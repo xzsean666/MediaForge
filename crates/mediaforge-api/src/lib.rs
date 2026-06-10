@@ -12,8 +12,8 @@ use mediaforge_manifest::{ManifestError, ManifestRepository};
 use mediaforge_storage::{create_object_storage, DynObjectStorage, StorageError};
 use mediaforge_tasks::{TaskError, TaskRepository};
 use mediaforge_types::{
-    GeneratedLink, ImageProcessingRequest, LinkPolicy, ResourceId, ResourceManifest, TaskId,
-    TaskOperation, TaskStatus, VideoProcessingRequest,
+    GeneratedLink, ImageProcessingRequest, LinkPolicy, MediaKind, ResourceId, ResourceManifest,
+    TaskId, TaskOperation, TaskStatus, VideoProcessingRequest,
 };
 use mediaforge_uploads::{UploadError, UploadSessionRepository};
 use serde::{Deserialize, Serialize};
@@ -131,7 +131,8 @@ async fn create_image_task(
 ) -> Result<Json<CreateTaskResponse>, ApiError> {
     let resource_id = ResourceId(resource_id);
     validate_resource_id(&resource_id)?;
-    state.manifests.read(&resource_id).await?;
+    let manifest = state.manifests.read(&resource_id).await?;
+    require_media_kind(&manifest, MediaKind::Image)?;
     let (task, status) = state
         .tasks
         .create_task(
@@ -158,7 +159,8 @@ async fn create_video_task(
 ) -> Result<Json<CreateTaskResponse>, ApiError> {
     let resource_id = ResourceId(resource_id);
     validate_resource_id(&resource_id)?;
-    state.manifests.read(&resource_id).await?;
+    let manifest = state.manifests.read(&resource_id).await?;
+    require_media_kind(&manifest, MediaKind::Video)?;
     let (task, status) = state
         .tasks
         .create_task(
@@ -186,9 +188,7 @@ async fn generate_link(
     let resource_id = ResourceId(resource_id);
     validate_resource_id(&resource_id)?;
     let manifest = state.manifests.read(&resource_id).await?;
-    let object_key = request
-        .object_key
-        .unwrap_or_else(|| manifest.original.object_key.clone());
+    let object_key = resolve_manifest_object_key(&manifest, request.object_key)?;
     let link = state
         .links
         .generate_link(&object_key, request.policy)
@@ -212,6 +212,36 @@ struct CreateTaskResponse {
     resource_id: ResourceId,
     task_id: TaskId,
     status: TaskStatus,
+}
+
+fn require_media_kind(manifest: &ResourceManifest, expected: MediaKind) -> Result<(), ApiError> {
+    if manifest.media_kind == expected {
+        return Ok(());
+    }
+
+    Err(ApiError::UnsupportedMediaType(format!(
+        "resource is {:?}; expected {:?}",
+        manifest.media_kind, expected
+    )))
+}
+
+fn resolve_manifest_object_key(
+    manifest: &ResourceManifest,
+    requested: Option<String>,
+) -> Result<String, ApiError> {
+    let object_key = requested.unwrap_or_else(|| manifest.original.object_key.clone());
+    if manifest.original.object_key == object_key
+        || manifest
+            .derived
+            .iter()
+            .any(|derived| derived.object.object_key == object_key)
+    {
+        return Ok(object_key);
+    }
+
+    Err(ApiError::BadRequest(
+        "object_key is not part of the requested resource manifest".to_string(),
+    ))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -248,7 +278,9 @@ impl IntoResponse for ApiError {
             | ApiError::Task(TaskError::NotFound(_))
             | ApiError::Upload(UploadError::NotFound(_))
             | ApiError::Storage(StorageError::NotFound(_)) => StatusCode::NOT_FOUND,
-            ApiError::Link(LinkError::MissingCdnBaseUrl) => StatusCode::BAD_REQUEST,
+            ApiError::Link(LinkError::MissingCdnBaseUrl | LinkError::InvalidPolicy(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -256,5 +288,79 @@ impl IntoResponse for ApiError {
             "error": self.to_string()
         }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mediaforge_types::{
+        DerivedMediaKind, DerivedMediaObject, MediaMetadata, MediaObject, ResultId,
+    };
+
+    fn media_object(object_key: &str) -> MediaObject {
+        MediaObject {
+            object_key: object_key.to_string(),
+            file_name: None,
+            mime_type: "image/png".to_string(),
+            size_bytes: 1,
+            checksum_sha256: "a".repeat(64),
+            metadata: MediaMetadata::default(),
+        }
+    }
+
+    fn manifest() -> ResourceManifest {
+        ResourceManifest {
+            resource_id: ResourceId(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            media_kind: MediaKind::Image,
+            original: media_object("media/resource/original/source.png"),
+            derived: vec![DerivedMediaObject {
+                result_id: ResultId(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                ),
+                derived_kind: DerivedMediaKind::ImageVariant,
+                object: media_object("media/resource/image/result/output.webp"),
+                parameters: serde_json::Value::Null,
+                created_at: chrono::Utc::now(),
+            }],
+            task_history: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn link_object_key_must_belong_to_manifest() {
+        let manifest = manifest();
+
+        assert_eq!(
+            resolve_manifest_object_key(&manifest, None).unwrap(),
+            "media/resource/original/source.png"
+        );
+        assert_eq!(
+            resolve_manifest_object_key(
+                &manifest,
+                Some("media/resource/image/result/output.webp".to_string())
+            )
+            .unwrap(),
+            "media/resource/image/result/output.webp"
+        );
+        assert!(resolve_manifest_object_key(
+            &manifest,
+            Some("media/other-resource/original/source.png".to_string())
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_kind_must_match_task_endpoint() {
+        let manifest = manifest();
+
+        assert!(require_media_kind(&manifest, MediaKind::Image).is_ok());
+        assert!(require_media_kind(&manifest, MediaKind::Video).is_err());
     }
 }

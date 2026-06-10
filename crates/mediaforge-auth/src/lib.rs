@@ -111,9 +111,9 @@ pub fn verify_hs256(
 /// Mints an HS256 JWT for the given claims. Useful for tooling and tests.
 pub fn encode_hs256(claims: &Claims, secret: &str) -> String {
     let header = serde_json::json!({"alg": "HS256", "typ": "JWT"});
-    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header serializes"));
-    let payload_b64 =
-        URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims serialize"));
+    let header_b64 =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header serializes"));
+    let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims serialize"));
     let signing_input = format!("{header_b64}.{payload_b64}");
     let signature = URL_SAFE_NO_PAD.encode(sign_input(signing_input.as_bytes(), secret));
     format!("{signing_input}.{signature}")
@@ -159,8 +159,14 @@ impl IntoResponse for AuthError {
 }
 
 fn bearer_token(request: &Request<Body>) -> Option<String> {
-    let value = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer "))?;
+    let value = request
+        .headers()
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))?;
     let token = token.trim();
     if token.is_empty() {
         None

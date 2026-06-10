@@ -24,6 +24,10 @@ pub enum ImageProcessingError {
 
 pub type ImageProcessingResult<T> = Result<T, ImageProcessingError>;
 
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_TEXT_WATERMARK_CHARS: usize = 512;
+const MAX_TEXT_WATERMARK_FONT_SIZE: u32 = 512;
+
 #[derive(Debug, Clone)]
 pub struct ProcessedImage {
     pub metadata: MediaMetadata,
@@ -100,19 +104,37 @@ fn validate_request(request: &ImageProcessingRequest) -> ImageProcessingResult<(
                         "resize requires width, height, or both".to_string(),
                     ));
                 }
+                validate_optional_dimension("resize width", *width)?;
+                validate_optional_dimension("resize height", *height)?;
             }
             ImageOperation::Crop { width, height, .. } => {
-                if *width == 0 || *height == 0 {
-                    return Err(ImageProcessingError::InvalidRequest(
-                        "crop width and height must be greater than zero".to_string(),
-                    ));
-                }
+                validate_dimension("crop width", *width)?;
+                validate_dimension("crop height", *height)?;
             }
-            ImageOperation::ImageWatermark { opacity, .. }
-            | ImageOperation::TextWatermark { opacity, .. } => {
-                if !(0.0..=1.0).contains(opacity) {
+            ImageOperation::ImageWatermark { opacity, .. } => {
+                validate_opacity(*opacity)?;
+            }
+            ImageOperation::TextWatermark {
+                text,
+                font_size,
+                color_hex,
+                opacity,
+                ..
+            } => {
+                validate_opacity(*opacity)?;
+                if text.is_empty() || text.chars().count() > MAX_TEXT_WATERMARK_CHARS {
+                    return Err(ImageProcessingError::InvalidRequest(format!(
+                        "text watermark must contain 1 to {MAX_TEXT_WATERMARK_CHARS} characters"
+                    )));
+                }
+                if *font_size == 0 || *font_size > MAX_TEXT_WATERMARK_FONT_SIZE {
+                    return Err(ImageProcessingError::InvalidRequest(format!(
+                        "font_size must be between 1 and {MAX_TEXT_WATERMARK_FONT_SIZE}"
+                    )));
+                }
+                if !is_hex_color(color_hex) {
                     return Err(ImageProcessingError::InvalidRequest(
-                        "watermark opacity must be between 0.0 and 1.0".to_string(),
+                        "color_hex must use #RRGGBB format".to_string(),
                     ));
                 }
             }
@@ -147,6 +169,8 @@ fn apply_operation(
                     width.expect("validated width"),
                 ),
             };
+            validate_dimension("resize target width", target_width)?;
+            validate_dimension("resize target height", target_height)?;
 
             Ok(match fit {
                 ResizeFit::Contain => {
@@ -165,7 +189,18 @@ fn apply_operation(
             y,
             width,
             height,
-        } => Ok(image.crop_imm(*x, *y, *width, *height)),
+        } => {
+            if *x >= image.width()
+                || *y >= image.height()
+                || *width > image.width().saturating_sub(*x)
+                || *height > image.height().saturating_sub(*y)
+            {
+                return Err(ImageProcessingError::InvalidRequest(
+                    "crop rectangle must fit within the source image".to_string(),
+                ));
+            }
+            Ok(image.crop_imm(*x, *y, *width, *height))
+        }
         ImageOperation::Rotate { degrees } => Ok(match degrees {
             RotationDegrees::Deg90 => image.rotate90(),
             RotationDegrees::Deg180 => image.rotate180(),
@@ -179,11 +214,47 @@ fn apply_operation(
 }
 
 fn scale_width(current_width: u32, current_height: u32, target_height: u32) -> u32 {
-    ((current_width as f64 / current_height as f64) * target_height as f64).round() as u32
+    ((current_width as f64 / current_height as f64) * target_height as f64)
+        .round()
+        .max(1.0) as u32
 }
 
 fn scale_height(current_width: u32, current_height: u32, target_width: u32) -> u32 {
-    ((current_height as f64 / current_width as f64) * target_width as f64).round() as u32
+    ((current_height as f64 / current_width as f64) * target_width as f64)
+        .round()
+        .max(1.0) as u32
+}
+
+fn validate_optional_dimension(name: &str, value: Option<u32>) -> ImageProcessingResult<()> {
+    if let Some(value) = value {
+        validate_dimension(name, value)?;
+    }
+    Ok(())
+}
+
+fn validate_dimension(name: &str, value: u32) -> ImageProcessingResult<()> {
+    if value == 0 || value > MAX_IMAGE_DIMENSION {
+        return Err(ImageProcessingError::InvalidRequest(format!(
+            "{name} must be between 1 and {MAX_IMAGE_DIMENSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_opacity(opacity: f32) -> ImageProcessingResult<()> {
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(ImageProcessingError::InvalidRequest(
+            "watermark opacity must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn write_image(
@@ -244,5 +315,42 @@ mod tests {
         assert!(output.exists());
         assert_eq!(processed.metadata.width, Some(10));
         assert_eq!(processed.metadata.height, Some(10));
+    }
+
+    #[test]
+    fn rejects_invalid_resize_dimensions() {
+        let request = ImageProcessingRequest {
+            output_format: ImageOutputFormat::Jpeg,
+            quality: Some(80),
+            operations: vec![ImageOperation::Resize {
+                width: Some(0),
+                height: Some(10),
+                fit: ResizeFit::Fill,
+            }],
+        };
+
+        assert!(matches!(
+            validate_request(&request),
+            Err(ImageProcessingError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn crop_must_fit_source_image() {
+        let image = DynamicImage::new_rgba8(20, 10);
+        let result = apply_operation(
+            image,
+            &ImageOperation::Crop {
+                x: 15,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ImageProcessingError::InvalidRequest(_))
+        ));
     }
 }

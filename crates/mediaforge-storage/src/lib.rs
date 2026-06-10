@@ -74,10 +74,7 @@ pub trait ObjectStorage: Send + Sync {
     /// Like [`get_object`](Self::get_object) but also returns an opaque version
     /// token (S3 ETag / filesystem content hash) for use with
     /// [`put_object_if_match`](Self::put_object_if_match).
-    async fn get_object_with_version(
-        &self,
-        key: &str,
-    ) -> StorageResult<(Bytes, Option<String>)>;
+    async fn get_object_with_version(&self, key: &str) -> StorageResult<(Bytes, Option<String>)>;
 
     /// Server-side copy from one key to another (S3 CopyObject). Used to move a
     /// finalized upload from its staging key to its content-addressed key
@@ -293,10 +290,7 @@ impl ObjectStorage for FilesystemObjectStorage {
         Ok(true)
     }
 
-    async fn get_object_with_version(
-        &self,
-        key: &str,
-    ) -> StorageResult<(Bytes, Option<String>)> {
+    async fn get_object_with_version(&self, key: &str) -> StorageResult<(Bytes, Option<String>)> {
         let bytes = self.get_object(key).await?;
         let version = content_version(&bytes);
         Ok((bytes, Some(version)))
@@ -660,9 +654,10 @@ impl ObjectStorage for S3ObjectStorage {
                     Ok(false)
                 } else if looks_like_not_implemented(&description) {
                     // Some S3-compatible backends (e.g. Backblaze B2) do not
-                    // implement conditional writes such as If-Match. Degrade
-                    // gracefully: creates become existence-checked writes,
-                    // updates become last-writer-wins (the pre-CAS behavior).
+                    // implement conditional writes such as If-Match. Degrade to
+                    // a best-effort version check instead of blindly overwriting.
+                    // This is not cross-process atomic, but it still rejects
+                    // obviously stale updates on providers without native CAS.
                     match expected_version {
                         None => {
                             if self.object_exists(&fallback_request.key).await? {
@@ -672,9 +667,15 @@ impl ObjectStorage for S3ObjectStorage {
                                 Ok(true)
                             }
                         }
-                        Some(_) => {
-                            self.put_object(fallback_request).await?;
-                            Ok(true)
+                        Some(expected) => {
+                            match self.get_object_with_version(&fallback_request.key).await {
+                                Ok((_bytes, current)) if current == Some(expected) => {
+                                    self.put_object(fallback_request).await?;
+                                    Ok(true)
+                                }
+                                Ok(_) | Err(StorageError::NotFound(_)) => Ok(false),
+                                Err(error) => Err(error),
+                            }
                         }
                     }
                 } else {
@@ -684,10 +685,7 @@ impl ObjectStorage for S3ObjectStorage {
         }
     }
 
-    async fn get_object_with_version(
-        &self,
-        key: &str,
-    ) -> StorageResult<(Bytes, Option<String>)> {
+    async fn get_object_with_version(&self, key: &str) -> StorageResult<(Bytes, Option<String>)> {
         validate_object_key(key)?;
         let output = self
             .client
@@ -918,8 +916,14 @@ mod tests {
         };
 
         // Create: expected_version None succeeds only when absent.
-        assert!(storage.put_object_if_match(make(b"v1"), None).await.unwrap());
-        assert!(!storage.put_object_if_match(make(b"v2"), None).await.unwrap());
+        assert!(storage
+            .put_object_if_match(make(b"v1"), None)
+            .await
+            .unwrap());
+        assert!(!storage
+            .put_object_if_match(make(b"v2"), None)
+            .await
+            .unwrap());
 
         let (_, version) = storage
             .get_object_with_version("manifest.json")

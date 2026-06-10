@@ -140,10 +140,19 @@ impl WorkerRuntime {
             if started >= self.config.worker_concurrency {
                 break;
             }
+            let Some(session) = self
+                .uploads
+                .claim_finalization(&upload_id, self.config.task_lease_timeout)
+                .await?
+            else {
+                continue;
+            };
+
             started += 1;
             let runtime = self.clone();
+            let upload_id = session.upload_id.clone();
             join_set.spawn(async move {
-                if let Err(error) = runtime.finalize_upload(&upload_id).await {
+                if let Err(error) = runtime.finalize_upload(session).await {
                     tracing::error!(upload_id = %upload_id, error = %error, "upload finalization failed");
                     let terminal = true; // finalization failures are not auto-retried for now
                     let _ = runtime
@@ -162,9 +171,8 @@ impl WorkerRuntime {
     /// schedules processing, and applies any source TTL. Server-side copy moves
     /// the bytes from the staging key to the content-addressed key without
     /// re-uploading.
-    async fn finalize_upload(&self, upload_id: &str) -> WorkerResult<()> {
-        let session = self.uploads.read(upload_id).await?;
-        if session.state != UploadState::Pending {
+    async fn finalize_upload(&self, session: UploadSession) -> WorkerResult<()> {
+        if session.state != UploadState::Finalizing {
             return Ok(());
         }
 
@@ -173,9 +181,14 @@ impl WorkerRuntime {
             .config
             .temp_directory
             .join(format!("finalize-{}.bin", Uuid::new_v4()));
-        self.storage
+        if let Err(error) = self
+            .storage
             .get_object_to_file(&session.staging_key, &temp_path)
-            .await?;
+            .await
+        {
+            remove_temp_file(temp_path).await;
+            return Err(error.into());
+        }
 
         let result = self.finalize_downloaded(&session, &temp_path).await;
         remove_temp_file(temp_path).await;
@@ -207,9 +220,8 @@ impl WorkerRuntime {
         }
 
         let metadata = match session.media_kind {
-            MediaKind::Image => {
-                ImageProcessor::inspect_image(temp_path).unwrap_or_else(|_| MediaMetadata::default())
-            }
+            MediaKind::Image => ImageProcessor::inspect_image(temp_path)
+                .unwrap_or_else(|_| MediaMetadata::default()),
             MediaKind::Video => MediaMetadata::default(),
         };
         let original = MediaObject {
@@ -234,7 +246,9 @@ impl WorkerRuntime {
 
         let processing_task_id = self.schedule_processing(&resource_id, session).await?;
         if let Some(task_id) = &processing_task_id {
-            self.manifests.record_task(&resource_id, task_id.clone()).await?;
+            self.manifests
+                .record_task(&resource_id, task_id.clone())
+                .await?;
         }
 
         self.uploads
@@ -269,7 +283,10 @@ impl WorkerRuntime {
 
         match operation {
             Some(operation) => {
-                let (task, _) = self.tasks.create_task(resource_id.clone(), operation).await?;
+                let (task, _) = self
+                    .tasks
+                    .create_task(resource_id.clone(), operation)
+                    .await?;
                 Ok(Some(task.task_id))
             }
             None => Ok(None),
@@ -345,7 +362,11 @@ impl WorkerRuntime {
             }
             if !self
                 .tasks
-                .claim_or_reclaim_task(&descriptor.task_id, worker_id, self.config.task_lease_timeout)
+                .claim_or_reclaim_task(
+                    &descriptor.task_id,
+                    worker_id,
+                    self.config.task_lease_timeout,
+                )
                 .await?
             {
                 continue;
@@ -424,6 +445,19 @@ impl WorkerRuntime {
         let source_path = self
             .download_to_temp(&manifest.original.object_key, "source")
             .await?;
+        let result = self
+            .process_image_downloaded(resource_id, request, &source_path)
+            .await;
+        remove_temp_file(source_path).await;
+        result
+    }
+
+    async fn process_image_downloaded(
+        &self,
+        resource_id: &ResourceId,
+        request: &ImageProcessingRequest,
+        source_path: &Path,
+    ) -> WorkerResult<()> {
         let result_id = result_id_from_parameters(resource_id, "image_processing", request)?;
         let output_path = self.config.temp_directory.join(format!(
             "image-{}.{}",
@@ -431,34 +465,41 @@ impl WorkerRuntime {
             request.output_format.extension()
         ));
 
-        let processed = ImageProcessor::process_file(&source_path, &output_path, request)?;
-        let object_key =
-            image_result_object_key(resource_id, &result_id, request.output_format.extension())?;
-        let media_object = self
-            .upload_output_file(
-                &object_key,
-                &output_path,
-                request.output_format.mime_type(),
-                processed.metadata,
-            )
-            .await?;
-
-        self.manifests
-            .merge_derived(
+        let result: WorkerResult<()> = async {
+            let processed = ImageProcessor::process_file(source_path, &output_path, request)?;
+            let object_key = image_result_object_key(
                 resource_id,
-                DerivedMediaObject {
-                    result_id,
-                    derived_kind: DerivedMediaKind::ImageVariant,
-                    object: media_object,
-                    parameters: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
-                    created_at: chrono::Utc::now(),
-                },
-            )
-            .await?;
+                &result_id,
+                request.output_format.extension(),
+            )?;
+            let media_object = self
+                .upload_output_file(
+                    &object_key,
+                    &output_path,
+                    request.output_format.mime_type(),
+                    processed.metadata,
+                )
+                .await?;
 
-        remove_temp_file(source_path).await;
+            self.manifests
+                .merge_derived(
+                    resource_id,
+                    DerivedMediaObject {
+                        result_id,
+                        derived_kind: DerivedMediaKind::ImageVariant,
+                        object: media_object,
+                        parameters: serde_json::to_value(request)
+                            .unwrap_or(serde_json::Value::Null),
+                        created_at: chrono::Utc::now(),
+                    },
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+
         remove_temp_file(output_path).await;
-        Ok(())
+        result
     }
 
     async fn process_video_task(
@@ -466,16 +507,32 @@ impl WorkerRuntime {
         resource_id: &ResourceId,
         request: &VideoProcessingRequest,
     ) -> WorkerResult<()> {
+        mediaforge_video::validate_request(request)?;
         let manifest = self.manifests.read(resource_id).await?;
         let source_path = self
             .download_to_temp(&manifest.original.object_key, "source")
             .await?;
-        let result_id = result_id_from_parameters(resource_id, "video_processing", request)?;
         let working_directory = self
             .config
             .temp_directory
             .join(format!("video-task-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&working_directory).await?;
+        let result = self
+            .process_video_downloaded(resource_id, request, &source_path, &working_directory)
+            .await;
+        remove_temp_file(source_path).await;
+        let _ = tokio::fs::remove_dir_all(working_directory).await;
+        result
+    }
+
+    async fn process_video_downloaded(
+        &self,
+        resource_id: &ResourceId,
+        request: &VideoProcessingRequest,
+        source_path: &Path,
+        working_directory: &Path,
+    ) -> WorkerResult<()> {
+        let result_id = result_id_from_parameters(resource_id, "video_processing", request)?;
+        tokio::fs::create_dir_all(working_directory).await?;
 
         let output_path =
             working_directory.join(format!("output.{}", request.profile.container.extension()));
@@ -585,8 +642,6 @@ impl WorkerRuntime {
                 .await?;
         }
 
-        remove_temp_file(source_path).await;
-        let _ = tokio::fs::remove_dir_all(working_directory).await;
         Ok(())
     }
 
@@ -696,8 +751,7 @@ impl WorkerRuntime {
         self.storage
             .put_object_streaming(object_key, path, Some(mime_type.to_string()))
             .await?;
-        let (checksum_sha256, size_bytes) =
-            mediaforge_ingest::file_sha256_and_size(path).await?;
+        let (checksum_sha256, size_bytes) = mediaforge_ingest::file_sha256_and_size(path).await?;
 
         Ok(MediaObject {
             object_key: object_key.to_string(),
@@ -831,8 +885,7 @@ mod tests {
     }
 
     fn runtime(root: &std::path::Path) -> WorkerRuntime {
-        let storage: DynObjectStorage =
-            Arc::new(FilesystemObjectStorage::new(root.to_path_buf()));
+        let storage: DynObjectStorage = Arc::new(FilesystemObjectStorage::new(root.to_path_buf()));
         WorkerRuntime::new(test_config(root), storage)
     }
 

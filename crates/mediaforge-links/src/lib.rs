@@ -14,6 +14,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum LinkError {
     #[error("cdn base url is required for this link policy")]
     MissingCdnBaseUrl,
+    #[error("invalid link policy: {0}")]
+    InvalidPolicy(String),
     #[error("invalid HMAC key")]
     InvalidSigningKey,
     #[error("storage presign failed: {0}")]
@@ -21,6 +23,8 @@ pub enum LinkError {
 }
 
 pub type LinkResult<T> = Result<T, LinkError>;
+
+const MAX_LINK_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone)]
 pub struct LinkGenerator {
@@ -50,7 +54,7 @@ impl LinkGenerator {
                 expires_at: None,
             }),
             LinkPolicy::Temporary { expires_in_seconds } => {
-                let expires_at = Utc::now() + ChronoDuration::seconds(expires_in_seconds as i64);
+                let expires_at = expires_at_from_seconds(expires_in_seconds)?;
                 Ok(GeneratedLink {
                     url: self.signed_cdn_url(object_key, expires_at, "read")?,
                     link_kind: LinkKind::Temporary,
@@ -61,7 +65,12 @@ impl LinkGenerator {
                 expires_in_seconds,
                 permission,
             } => {
-                let expires_at = Utc::now() + ChronoDuration::seconds(expires_in_seconds as i64);
+                if permission.trim().is_empty() {
+                    return Err(LinkError::InvalidPolicy(
+                        "permission must not be empty".to_string(),
+                    ));
+                }
+                let expires_at = expires_at_from_seconds(expires_in_seconds)?;
                 Ok(GeneratedLink {
                     url: self.signed_cdn_url(object_key, expires_at, &permission)?,
                     link_kind: LinkKind::Signed,
@@ -69,7 +78,7 @@ impl LinkGenerator {
                 })
             }
             LinkPolicy::StoragePresigned { expires_in_seconds } => {
-                let expires_at = Utc::now() + ChronoDuration::seconds(expires_in_seconds as i64);
+                let expires_at = expires_at_from_seconds(expires_in_seconds)?;
                 let url = self
                     .storage
                     .presign_get_url(object_key, Duration::from_secs(expires_in_seconds))
@@ -136,6 +145,18 @@ impl LinkGenerator {
         mac.update(payload.as_bytes());
         Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
     }
+}
+
+fn expires_at_from_seconds(expires_in_seconds: u64) -> LinkResult<DateTime<Utc>> {
+    if expires_in_seconds == 0 || expires_in_seconds > MAX_LINK_EXPIRY_SECONDS {
+        return Err(LinkError::InvalidPolicy(format!(
+            "expires_in_seconds must be between 1 and {MAX_LINK_EXPIRY_SECONDS}"
+        )));
+    }
+
+    Utc::now()
+        .checked_add_signed(ChronoDuration::seconds(expires_in_seconds as i64))
+        .ok_or_else(|| LinkError::InvalidPolicy("expires_in_seconds is too large".to_string()))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -243,5 +264,25 @@ mod tests {
                 Utc::now(),
             )
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn oversized_expiry_is_rejected() {
+        let config = test_config();
+        let storage = Arc::new(FilesystemObjectStorage::new(PathBuf::from(
+            "/tmp/mediaforge-test",
+        )));
+        let generator = LinkGenerator::new(&config, storage);
+
+        let error = generator
+            .generate_link(
+                "media/sha256/aa/bb/object.jpg",
+                LinkPolicy::Temporary {
+                    expires_in_seconds: MAX_LINK_EXPIRY_SECONDS + 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LinkError::InvalidPolicy(_)));
     }
 }

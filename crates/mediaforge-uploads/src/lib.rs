@@ -12,6 +12,7 @@ use mediaforge_storage::{DynObjectStorage, PutObjectRequest, StorageError};
 use mediaforge_types::{MediaKind, ResourceId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,9 +25,13 @@ pub enum UploadError {
     NotFound(String),
     #[error("failed to serialize upload session: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("upload session update for {0} kept conflicting after {1} attempts")]
+    Conflict(String, u32),
 }
 
 pub type UploadResult<T> = Result<T, UploadError>;
+
+const MAX_UPLOAD_UPDATE_ATTEMPTS: u32 = 5;
 
 /// Lifecycle of a presigned upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +41,8 @@ pub enum UploadState {
     Created,
     /// Client reported completion; queued for worker finalization.
     Pending,
+    /// A worker claimed the upload and is finalizing it. Reclaimable after timeout.
+    Finalizing,
     /// Finalized: bytes hashed, content-addressed, manifest written.
     Completed,
     /// Finalization failed permanently.
@@ -113,30 +120,87 @@ impl UploadSessionRepository {
     }
 
     pub async fn read(&self, upload_id: &str) -> UploadResult<UploadSession> {
+        Ok(self.read_with_version(upload_id).await?.0)
+    }
+
+    async fn read_with_version(
+        &self,
+        upload_id: &str,
+    ) -> UploadResult<(UploadSession, Option<String>)> {
         let key = upload_session_key(upload_id);
-        let bytes = self
-            .storage
-            .get_object(&key)
-            .await
-            .map_err(|error| match error {
-                StorageError::NotFound(_) => UploadError::NotFound(upload_id.to_string()),
-                other => UploadError::Storage(other),
-            })?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let (bytes, version) =
+            self.storage
+                .get_object_with_version(&key)
+                .await
+                .map_err(|error| match error {
+                    StorageError::NotFound(_) => UploadError::NotFound(upload_id.to_string()),
+                    other => UploadError::Storage(other),
+                })?;
+        Ok((serde_json::from_slice(&bytes)?, version))
     }
 
     /// Moves a session into the finalization queue (idempotent).
     pub async fn enqueue_finalization(&self, upload_id: &str) -> UploadResult<UploadSession> {
         let mut session = self.read(upload_id).await?;
-        if session.state == UploadState::Created || session.state == UploadState::Failed {
-            session.state = UploadState::Pending;
+        match session.state {
+            UploadState::Created | UploadState::Failed => {
+                session.state = UploadState::Pending;
+                session.error = None;
+                session.updated_at = Utc::now();
+                self.write(&session).await?;
+                self.write_pending_marker(upload_id).await?;
+            }
+            UploadState::Pending => {
+                self.write_pending_marker(upload_id).await?;
+            }
+            UploadState::Finalizing => {}
+            UploadState::Completed => {
+                self.remove_pending(upload_id).await?;
+            }
+        }
+        Ok(session)
+    }
+
+    /// Claims a queued upload before worker finalization. A crashed worker's
+    /// `Finalizing` state can be reclaimed once its lease-like timestamp expires.
+    pub async fn claim_finalization(
+        &self,
+        upload_id: &str,
+        lease_timeout: Duration,
+    ) -> UploadResult<Option<UploadSession>> {
+        let key = upload_session_key(upload_id);
+
+        for _ in 0..MAX_UPLOAD_UPDATE_ATTEMPTS {
+            let (mut session, version) = self.read_with_version(upload_id).await?;
+            let claimable = match session.state {
+                UploadState::Pending => true,
+                UploadState::Finalizing => finalization_claim_expired(&session, lease_timeout),
+                UploadState::Created | UploadState::Completed | UploadState::Failed => {
+                    self.remove_pending(upload_id).await?;
+                    return Ok(None);
+                }
+            };
+
+            if !claimable {
+                return Ok(None);
+            }
+
+            session.state = UploadState::Finalizing;
             session.error = None;
             session.updated_at = Utc::now();
-            self.write(&session).await?;
+            let committed = self
+                .storage
+                .put_object_if_match(self.session_put_request(key.clone(), &session)?, version)
+                .await?;
+            if committed {
+                return Ok(Some(session));
+            }
         }
-        self.put_json(upload_pending_key(upload_id), &PendingMarker::new(upload_id))
-            .await?;
-        Ok(session)
+
+        Err(UploadError::Conflict(
+            upload_id.to_string(),
+            MAX_UPLOAD_UPDATE_ATTEMPTS,
+        ))
     }
 
     /// Returns the upload ids currently awaiting finalization.
@@ -176,15 +240,24 @@ impl UploadSessionRepository {
         terminal: bool,
     ) -> UploadResult<UploadSession> {
         let mut session = self.read(upload_id).await?;
+        if session.state == UploadState::Completed {
+            self.remove_pending(upload_id).await?;
+            return Ok(session);
+        }
+
         session.attempts += 1;
         session.error = Some(error);
         session.updated_at = Utc::now();
         if terminal {
             session.state = UploadState::Failed;
+        } else {
+            session.state = UploadState::Pending;
         }
         self.write(&session).await?;
         if terminal {
             self.remove_pending(upload_id).await?;
+        } else {
+            self.write_pending_marker(upload_id).await?;
         }
         Ok(session)
     }
@@ -207,8 +280,31 @@ impl UploadSessionRepository {
     }
 
     async fn write(&self, session: &UploadSession) -> UploadResult<()> {
-        self.put_json(upload_session_key(&session.upload_id), session)
-            .await
+        self.storage
+            .put_object(self.session_put_request(upload_session_key(&session.upload_id), session)?)
+            .await?;
+        Ok(())
+    }
+
+    async fn write_pending_marker(&self, upload_id: &str) -> UploadResult<()> {
+        self.put_json(
+            upload_pending_key(upload_id),
+            &PendingMarker::new(upload_id),
+        )
+        .await
+    }
+
+    fn session_put_request(
+        &self,
+        key: String,
+        session: &UploadSession,
+    ) -> UploadResult<PutObjectRequest> {
+        Ok(PutObjectRequest {
+            key,
+            bytes: Bytes::from(serde_json::to_vec_pretty(session)?),
+            content_type: Some("application/json".to_string()),
+            metadata: BTreeMap::new(),
+        })
     }
 
     async fn put_json<T>(&self, key: String, value: &T) -> UploadResult<()>
@@ -225,6 +321,11 @@ impl UploadSessionRepository {
             .await?;
         Ok(())
     }
+}
+
+fn finalization_claim_expired(session: &UploadSession, lease_timeout: Duration) -> bool {
+    let elapsed_seconds = (Utc::now() - session.updated_at).num_seconds();
+    Duration::from_secs(elapsed_seconds.max(0) as u64) >= lease_timeout
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -286,6 +387,70 @@ mod tests {
         assert_eq!(loaded.state, UploadState::Completed);
         assert_eq!(loaded.resource_id, Some(resource_id));
         assert!(repository.list_pending().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_upload_is_not_requeued_by_duplicate_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FilesystemObjectStorage::new(directory.path().to_path_buf()));
+        let repository = UploadSessionRepository::new(storage);
+
+        let session = repository.create(new_image_upload()).await.unwrap();
+        repository
+            .enqueue_finalization(&session.upload_id)
+            .await
+            .unwrap();
+        repository
+            .mark_finalized(
+                &session.upload_id,
+                mediaforge_core::resource_id_from_bytes(b"asset"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let session = repository
+            .enqueue_finalization(&session.upload_id)
+            .await
+            .unwrap();
+        assert_eq!(session.state, UploadState::Completed);
+        assert!(repository.list_pending().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalization_claim_only_succeeds_once_until_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FilesystemObjectStorage::new(directory.path().to_path_buf()));
+        let repository = UploadSessionRepository::new(storage);
+
+        let session = repository.create(new_image_upload()).await.unwrap();
+        repository
+            .enqueue_finalization(&session.upload_id)
+            .await
+            .unwrap();
+
+        let claimed = repository
+            .claim_finalization(&session.upload_id, Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.state, UploadState::Finalizing);
+
+        assert!(repository
+            .claim_finalization(&session.upload_id, Duration::from_secs(600))
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut stale = repository.read(&session.upload_id).await.unwrap();
+        stale.updated_at = Utc::now() - chrono::Duration::seconds(10);
+        repository.write(&stale).await.unwrap();
+
+        assert!(repository
+            .claim_finalization(&session.upload_id, Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

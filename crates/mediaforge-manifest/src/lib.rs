@@ -46,14 +46,14 @@ impl ManifestRepository {
         resource_id: &ResourceId,
     ) -> ManifestResult<(ResourceManifest, Option<String>)> {
         let key = manifest_key(resource_id)?;
-        let (bytes, version) = self
-            .storage
-            .get_object_with_version(&key)
-            .await
-            .map_err(|error| match error {
-                StorageError::NotFound(_) => ManifestError::NotFound(resource_id.clone()),
-                other => ManifestError::Storage(other),
-            })?;
+        let (bytes, version) =
+            self.storage
+                .get_object_with_version(&key)
+                .await
+                .map_err(|error| match error {
+                    StorageError::NotFound(_) => ManifestError::NotFound(resource_id.clone()),
+                    other => ManifestError::Storage(other),
+                })?;
         Ok((serde_json::from_slice(&bytes)?, version))
     }
 

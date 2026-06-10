@@ -5,7 +5,8 @@ use std::time::Duration;
 
 /// Default value of `MEDIAFORGE_LINK_SIGNING_SECRET`. Used in development only;
 /// running in production with this value is insecure and triggers a startup warning.
-pub const DEVELOPMENT_LINK_SIGNING_SECRET: &str = "development-only-secret";
+pub const DEVELOPMENT_LINK_SIGNING_SECRET: &str = "development-only-change-me";
+const LEGACY_DEVELOPMENT_LINK_SIGNING_SECRET: &str = "development-only-secret";
 
 /// Default maximum upload size when the upload limit is enabled (5 GiB).
 pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -173,10 +174,7 @@ impl AppConfig {
             enabled: parse_bool(env_string("MEDIAFORGE_UPLOAD_LIMIT_ENABLED", "true")),
             max_bytes: parse_u64(
                 "MEDIAFORGE_MAX_UPLOAD_BYTES",
-                env_string(
-                    "MEDIAFORGE_MAX_UPLOAD_BYTES",
-                    DEFAULT_MAX_UPLOAD_BYTES_STR,
-                ),
+                env_string("MEDIAFORGE_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES_STR),
             )?,
         };
 
@@ -210,6 +208,7 @@ impl AppConfig {
     /// default. Callers should warn loudly before serving production traffic.
     pub fn uses_default_signing_secret(&self) -> bool {
         self.link_signing_secret == DEVELOPMENT_LINK_SIGNING_SECRET
+            || self.link_signing_secret == LEGACY_DEVELOPMENT_LINK_SIGNING_SECRET
     }
 }
 
@@ -322,5 +321,55 @@ mod tests {
 
         let filesystem = required_when_s3(StorageBackend::Filesystem, "MEDIAFORGE_S3_BUCKET");
         assert_eq!(filesystem.unwrap(), "mediaforge");
+    }
+
+    #[test]
+    fn development_signing_secrets_are_detected() {
+        let mut config = AppConfig::from_env().unwrap_or_else(|_| AppConfig {
+            runtime_mode: RuntimeMode::Combined,
+            http_bind: "127.0.0.1:8080".parse().unwrap(),
+            storage: StorageConfig {
+                backend: StorageBackend::Filesystem,
+                s3: S3Config {
+                    endpoint: None,
+                    region: "auto".to_string(),
+                    bucket: "mediaforge".to_string(),
+                    access_key_id: None,
+                    secret_access_key: None,
+                    force_path_style: false,
+                },
+                filesystem_root: PathBuf::from("/tmp/mediaforge-object-store"),
+            },
+            cdn_base_url: None,
+            link_signing_secret: DEVELOPMENT_LINK_SIGNING_SECRET.to_string(),
+            auth: AuthConfig {
+                enabled: false,
+                jwt_secret: None,
+                leeway_seconds: 30,
+            },
+            upload_limit: UploadLimitConfig {
+                enabled: true,
+                max_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            },
+            temp_directory: PathBuf::from("/tmp/mediaforge"),
+            ffmpeg_path: "ffmpeg".to_string(),
+            ffprobe_path: "ffprobe".to_string(),
+            ffmpeg_threads: None,
+            worker_concurrency: 1,
+            worker_poll_interval: Duration::from_secs(1),
+            task_lease_timeout: Duration::from_secs(600),
+            task_max_attempts: 3,
+            presigned_upload_expiry: Duration::from_secs(3600),
+            source_reaper_enabled: true,
+            sqlite_cache_path: None,
+            log_level: "info".to_string(),
+        });
+
+        config.link_signing_secret = DEVELOPMENT_LINK_SIGNING_SECRET.to_string();
+        assert!(config.uses_default_signing_secret());
+        config.link_signing_secret = LEGACY_DEVELOPMENT_LINK_SIGNING_SECRET.to_string();
+        assert!(config.uses_default_signing_secret());
+        config.link_signing_secret = "not-a-default-secret".to_string();
+        assert!(!config.uses_default_signing_secret());
     }
 }

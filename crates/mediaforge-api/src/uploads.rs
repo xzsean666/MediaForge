@@ -17,6 +17,8 @@ use mediaforge_types::MediaKind;
 use mediaforge_uploads::{NewUpload, UploadSession};
 use serde::{Deserialize, Serialize};
 
+const MAX_SOURCE_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
+
 #[derive(Debug, Deserialize)]
 pub struct CreateUploadRequest {
     pub media_kind: MediaKind,
@@ -51,6 +53,7 @@ pub async fn create_upload(
     Json(request): Json<CreateUploadRequest>,
 ) -> Result<(StatusCode, Json<CreateUploadResponse>), ApiError> {
     enforce_declared_size(&state, request.declared_size_bytes)?;
+    enforce_source_ttl(request.source_expires_in_seconds)?;
 
     let session = state
         .uploads
@@ -71,7 +74,8 @@ pub async fn create_upload(
         .storage
         .presign_put_url(&session.staging_key, expiry, None)
         .await?;
-    let expires_at = Utc::now() + ChronoDuration::from_std(expiry).unwrap_or(ChronoDuration::hours(1));
+    let expires_at =
+        Utc::now() + ChronoDuration::from_std(expiry).unwrap_or(ChronoDuration::hours(1));
 
     Ok((
         StatusCode::CREATED,
@@ -141,13 +145,21 @@ pub async fn delete_upload(
 }
 
 fn enforce_declared_size(state: &AppState, declared: Option<u64>) -> Result<(), ApiError> {
-    if let (Some(limit), Some(size)) = (
-        state.config.upload_limit.effective_max_bytes(),
-        declared,
-    ) {
+    if let (Some(limit), Some(size)) = (state.config.upload_limit.effective_max_bytes(), declared) {
         if size > limit {
             return Err(ApiError::PayloadTooLarge(format!(
                 "declared size {size} bytes exceeds limit {limit} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn enforce_source_ttl(source_expires_in_seconds: Option<u64>) -> Result<(), ApiError> {
+    if let Some(seconds) = source_expires_in_seconds {
+        if seconds > MAX_SOURCE_TTL_SECONDS {
+            return Err(ApiError::BadRequest(format!(
+                "source_expires_in_seconds must be at most {MAX_SOURCE_TTL_SECONDS}"
             )));
         }
     }

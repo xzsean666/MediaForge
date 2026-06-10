@@ -21,6 +21,9 @@ pub enum VideoProcessingError {
 
 pub type VideoProcessingResult<T> = Result<T, VideoProcessingError>;
 
+const MAX_SCREENSHOT_REQUESTS: usize = 20;
+const MAX_VIDEO_BITRATE_KBPS: u32 = 200_000;
+
 #[derive(Debug, Clone)]
 pub struct FfmpegProcessor {
     ffmpeg_path: String,
@@ -60,11 +63,7 @@ impl FfmpegProcessor {
         timestamp_seconds: f64,
         output_format: ImageOutputFormat,
     ) -> VideoProcessingResult<()> {
-        if timestamp_seconds < 0.0 {
-            return Err(VideoProcessingError::InvalidRequest(
-                "screenshot timestamp must be non-negative".to_string(),
-            ));
-        }
+        validate_screenshot_timestamp(timestamp_seconds)?;
 
         let mut arguments = base_ffmpeg_arguments(self.thread_count);
         arguments.extend([
@@ -123,7 +122,7 @@ impl FfmpegProcessor {
         working_directory: impl AsRef<Path>,
         request: &VideoProcessingRequest,
     ) -> VideoProcessingResult<Vec<PathBuf>> {
-        validate_profile(&request.profile)?;
+        validate_request(request)?;
         tokio::fs::create_dir_all(working_directory.as_ref()).await?;
         let mut outputs = Vec::new();
 
@@ -214,6 +213,22 @@ impl FfmpegProcessor {
     }
 }
 
+pub fn validate_request(request: &VideoProcessingRequest) -> VideoProcessingResult<()> {
+    validate_profile(&request.profile)?;
+
+    if request.screenshots.len() > MAX_SCREENSHOT_REQUESTS {
+        return Err(VideoProcessingError::InvalidRequest(format!(
+            "screenshots must contain at most {MAX_SCREENSHOT_REQUESTS} entries"
+        )));
+    }
+
+    for screenshot in &request.screenshots {
+        validate_screenshot_timestamp(screenshot.timestamp_seconds)?;
+    }
+
+    Ok(())
+}
+
 pub fn build_transcode_arguments(
     input_path: &Path,
     output_path: &Path,
@@ -271,6 +286,23 @@ fn validate_profile(profile: &VideoProfile) -> VideoProcessingResult<()> {
         }
     }
 
+    if let Some(bitrate_kbps) = profile.bitrate_kbps {
+        if bitrate_kbps == 0 || bitrate_kbps > MAX_VIDEO_BITRATE_KBPS {
+            return Err(VideoProcessingError::InvalidRequest(format!(
+                "bitrate_kbps must be between 1 and {MAX_VIDEO_BITRATE_KBPS}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_screenshot_timestamp(timestamp_seconds: f64) -> VideoProcessingResult<()> {
+    if !timestamp_seconds.is_finite() || timestamp_seconds < 0.0 {
+        return Err(VideoProcessingError::InvalidRequest(
+            "screenshot timestamp must be finite and non-negative".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -330,5 +362,31 @@ mod tests {
         assert!(arguments.contains(&"libx264".to_string()));
         assert!(arguments.contains(&"scale=-2:720".to_string()));
         assert!(arguments.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn rejects_too_many_screenshots() {
+        let request = VideoProcessingRequest {
+            profile: VideoProfile {
+                codec: VideoCodec::H264,
+                container: VideoContainer::Mp4,
+                resolution: Some(VideoResolution::P720),
+                crf: Some(23),
+                bitrate_kbps: None,
+            },
+            screenshots: (0..=MAX_SCREENSHOT_REQUESTS)
+                .map(|_| mediaforge_types::ScreenshotRequest {
+                    timestamp_seconds: 1.0,
+                    output_format: ImageOutputFormat::Jpeg,
+                })
+                .collect(),
+            generate_cover: false,
+            generate_hls: false,
+        };
+
+        assert!(matches!(
+            validate_request(&request),
+            Err(VideoProcessingError::InvalidRequest(_))
+        ));
     }
 }

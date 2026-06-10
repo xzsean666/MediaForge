@@ -119,8 +119,12 @@ impl TaskRepository {
     pub async fn claim_task(&self, task_id: &TaskId, worker_id: &str) -> TaskResult<bool> {
         let created = self.write_lease_if_absent(task_id, worker_id).await?;
         if created {
-            self.transition(task_id, TaskState::Leased, Some(format!("leased by {worker_id}")))
-                .await?;
+            self.transition(
+                task_id,
+                TaskState::Leased,
+                Some(format!("leased by {worker_id}")),
+            )
+            .await?;
         }
         Ok(created)
     }
@@ -134,8 +138,12 @@ impl TaskRepository {
         lease_timeout: Duration,
     ) -> TaskResult<bool> {
         if self.write_lease_if_absent(task_id, worker_id).await? {
-            self.transition(task_id, TaskState::Leased, Some(format!("leased by {worker_id}")))
-                .await?;
+            self.transition(
+                task_id,
+                TaskState::Leased,
+                Some(format!("leased by {worker_id}")),
+            )
+            .await?;
             return Ok(true);
         }
 
@@ -164,7 +172,9 @@ impl TaskRepository {
         task_id: &TaskId,
         message: Option<String>,
     ) -> TaskResult<TaskStatus> {
-        let status = self.transition(task_id, TaskState::Completed, message).await?;
+        let status = self
+            .transition(task_id, TaskState::Completed, message)
+            .await?;
         self.put_json(task_completed_key(task_id), &status).await?;
         // Remove the task from the work queue so `list_pending` does not keep
         // re-reading completed descriptors forever.
@@ -411,8 +421,14 @@ mod tests {
             .await
             .unwrap();
 
-        repository.claim_task(&task.task_id, "worker-a").await.unwrap();
-        repository.mark_completed(&task.task_id, None).await.unwrap();
+        repository
+            .claim_task(&task.task_id, "worker-a")
+            .await
+            .unwrap();
+        repository
+            .mark_completed(&task.task_id, None)
+            .await
+            .unwrap();
 
         // The descriptor is gone from the pending queue, so the worker stops
         // re-reading it on every poll.
@@ -430,7 +446,10 @@ mod tests {
             .create_task(resource_id, sample_operation())
             .await
             .unwrap();
-        repository.claim_task(&task.task_id, "worker-a").await.unwrap();
+        repository
+            .claim_task(&task.task_id, "worker-a")
+            .await
+            .unwrap();
 
         // First failure (attempt 1 of 2): requeued as Pending and reclaimable.
         let status = repository
@@ -463,7 +482,10 @@ mod tests {
             .create_task(resource_id, sample_operation())
             .await
             .unwrap();
-        repository.claim_task(&task.task_id, "crashed-worker").await.unwrap();
+        repository
+            .claim_task(&task.task_id, "crashed-worker")
+            .await
+            .unwrap();
 
         // A fresh lease cannot be stolen.
         assert!(!repository
