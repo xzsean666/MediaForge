@@ -67,6 +67,15 @@ impl TaskRepository {
             updated_at: now,
         };
 
+        if let Ok(current_status) = self.read_status(&task_id).await {
+            if matches!(
+                current_status.state,
+                TaskState::Completed | TaskState::Failed
+            ) {
+                return Ok((descriptor, current_status));
+            }
+        }
+
         self.put_json_if_absent(task_pending_key(&task_id), &descriptor)
             .await?;
         self.put_json_if_absent(task_status_key(&task_id), &status)
@@ -436,6 +445,35 @@ mod tests {
         // Status is still queryable.
         let status = repository.read_status(&task.task_id).await.unwrap();
         assert_eq!(status.state, TaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn repeated_completed_task_creation_does_not_requeue_descriptor() {
+        let (_dir, repository) = test_repository().await;
+        let resource_id = mediaforge_core::resource_id_from_bytes(b"video");
+        let operation = sample_operation();
+        let (task, _) = repository
+            .create_task(resource_id.clone(), operation.clone())
+            .await
+            .unwrap();
+
+        repository
+            .claim_task(&task.task_id, "worker-a")
+            .await
+            .unwrap();
+        repository
+            .mark_completed(&task.task_id, None)
+            .await
+            .unwrap();
+
+        let (again, status) = repository
+            .create_task(resource_id, operation)
+            .await
+            .unwrap();
+
+        assert_eq!(again.task_id, task.task_id);
+        assert_eq!(status.state, TaskState::Completed);
+        assert!(repository.list_pending().await.unwrap().is_empty());
     }
 
     #[tokio::test]

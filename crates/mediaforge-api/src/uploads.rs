@@ -14,7 +14,7 @@ use axum::Json;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use mediaforge_storage::StorageError;
 use mediaforge_types::MediaKind;
-use mediaforge_uploads::{NewUpload, UploadSession};
+use mediaforge_uploads::{NewUpload, UploadSession, UploadState};
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
@@ -95,6 +95,14 @@ pub async fn complete_upload(
     Path(upload_id): Path<String>,
 ) -> Result<(StatusCode, Json<UploadSession>), ApiError> {
     let session = state.uploads.read(&upload_id).await?;
+
+    if matches!(
+        session.state,
+        UploadState::Pending | UploadState::Finalizing | UploadState::Completed
+    ) {
+        let session = state.uploads.enqueue_finalization(&upload_id).await?;
+        return Ok((StatusCode::ACCEPTED, Json(session)));
+    }
 
     // Confirm the object actually landed in storage and recheck the real size
     // against the limit (the declared size cannot be trusted).

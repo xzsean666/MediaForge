@@ -21,6 +21,7 @@ use mediaforge_video::{FfmpegProcessor, VideoProcessingError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -182,12 +183,11 @@ impl WorkerRuntime {
             .temp_directory
             .join(format!("finalize-{}.bin", Uuid::new_v4()));
         if let Err(error) = self
-            .storage
-            .get_object_to_file(&session.staging_key, &temp_path)
+            .download_staging_to_temp(&session.staging_key, &temp_path)
             .await
         {
             remove_temp_file(temp_path).await;
-            return Err(error.into());
+            return Err(error);
         }
 
         let result = self.finalize_downloaded(&session, &temp_path).await;
@@ -738,6 +738,22 @@ impl WorkerRuntime {
                 .join(format!("{label}-{}.{}", Uuid::new_v4(), extension));
         self.storage.get_object_to_file(object_key, &path).await?;
         Ok(path)
+    }
+
+    async fn download_staging_to_temp(&self, object_key: &str, path: &Path) -> WorkerResult<()> {
+        const MAX_ATTEMPTS: usize = 6;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.storage.get_object_to_file(object_key, path).await {
+                Ok(_) => return Ok(()),
+                Err(StorageError::NotFound(_)) if attempt < MAX_ATTEMPTS => {
+                    sleep(Duration::from_secs(1)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        Err(StorageError::NotFound(object_key.to_string()).into())
     }
 
     /// Uploads a local output file by streaming, then records its checksum/size.
