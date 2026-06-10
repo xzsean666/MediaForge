@@ -11,11 +11,11 @@ Current workflow stage:
 - Step 1: Architecture Design completed.
 - Step 2: Documentation completed.
 - Step 3: Context Handoff completed by this file.
-- Step 4: Implementation not started.
+- Step 4: Implementation MVP completed.
 
 Important rule:
 
-- Do not write implementation code until the user explicitly requests Step 4.
+- Further implementation can continue because the user explicitly requested Step 4 in the current session.
 
 Existing git commits before this handoff file:
 
@@ -28,15 +28,32 @@ Existing git commits before this handoff file:
 
 ```text
 Agent.md
+Cargo.toml
+Cargo.lock
 docs/
   ARCHITECTURE.md
   SPEC.md
   BUILD.md
   EXTERNAL_DOCS.md
   nextsession.md
+crates/
+  mediaforge-cli/
+  mediaforge-api/
+  mediaforge-worker/
+  mediaforge-core/
+  mediaforge-config/
+  mediaforge-types/
+  mediaforge-storage/
+  mediaforge-ingest/
+  mediaforge-manifest/
+  mediaforge-image/
+  mediaforge-video/
+  mediaforge-tasks/
+  mediaforge-links/
+  mediaforge-observability/
 ```
 
-There is currently no Rust workspace, no `Cargo.toml`, and no implementation code.
+The repository contains a Rust workspace and runnable `mediaforge` CLI.
 
 ## 3. Architecture Summary
 
@@ -63,6 +80,7 @@ Planned Rust workspace:
 
 ```text
 crates/
+  mediaforge-cli/
   mediaforge-api/
   mediaforge-worker/
   mediaforge-core/
@@ -76,6 +94,26 @@ crates/
   mediaforge-tasks/
   mediaforge-links/
   mediaforge-cache/
+  mediaforge-observability/
+```
+
+Implemented MVP crates:
+
+```text
+crates/
+  mediaforge-cli/
+  mediaforge-api/
+  mediaforge-worker/
+  mediaforge-core/
+  mediaforge-config/
+  mediaforge-types/
+  mediaforge-storage/
+  mediaforge-ingest/
+  mediaforge-manifest/
+  mediaforge-image/
+  mediaforge-video/
+  mediaforge-tasks/
+  mediaforge-links/
   mediaforge-observability/
 ```
 
@@ -93,52 +131,63 @@ Completed git workflow:
 
 - Step 1 committed.
 - Step 2 committed.
-- Step 3 is represented by this file and should be the latest commit after the current work is completed.
+- Step 3 committed.
+- Step 4 MVP commits added.
 
 ## 5. Pending Tasks
 
-### 5.1 Before Implementation
+### 5.1 Ongoing Implementation Rules
 
-If the user asks for changes before Step 4:
+If the user asks for more implementation work:
 
-1. Update documentation only.
-2. Keep all project docs in `docs/`, except root `Agent.md`.
-3. Update `docs/EXTERNAL_DOCS.md` for any new external integration.
-4. Commit documentation changes.
+1. Preserve the existing crate boundaries.
+2. Keep durable state in S3-compatible object storage.
+3. Keep local filesystem storage limited to development and tests.
+4. Update `docs/EXTERNAL_DOCS.md` for any new external integration.
+5. Commit after each major step.
 
-### 5.2 Step 4 Implementation Plan
+### 5.2 Completed Step 4 Implementation
 
-Only after explicit user approval:
+Completed:
 
-1. Create Rust workspace and root `Cargo.toml`.
-2. Create `mediaforge-types` with request, response, manifest, task, and processing parameter types.
-3. Create `mediaforge-core` with Resource ID, Result ID, Task ID, canonical parameter, and storage key logic.
-4. Create `mediaforge-config` with centralized configuration loading and validation.
-5. Create `mediaforge-storage` with S3-compatible storage access.
-6. Create `mediaforge-manifest` for manifest read, write, and merge behavior.
-7. Create `mediaforge-ingest` for streaming upload, temporary files, hashing, MIME detection, and cleanup.
-8. Create `mediaforge-links` for public, temporary, HMAC signed, and optional S3 presigned links.
-9. Create `mediaforge-tasks` for object-storage task descriptors, task status, leases, and idempotency.
-10. Create `mediaforge-image` with parameter validation first, then libvips-backed processing.
-11. Create `mediaforge-video` with parameter validation first, then FFmpeg execution management.
-12. Create `mediaforge-api` with routes that delegate all business behavior to modules.
-13. Create `mediaforge-worker` with task polling, claiming, execution, and result upload.
-14. Add observability through `mediaforge-observability`.
-15. Add integration tests using S3-compatible local storage.
-16. Add Docker and Kubernetes deployment assets.
+1. Rust workspace and root `Cargo.toml`.
+2. Shared type crate.
+3. Core identity and storage key logic.
+4. Centralized environment configuration.
+5. S3-compatible storage module plus filesystem backend for local development/tests.
+6. Manifest repository.
+7. Object-storage-backed task repository.
+8. Link generator for public, temporary, signed, and storage presigned links.
+9. Ingest module with temporary-file streaming session and content hashing.
+10. Image module with resize, crop, rotate, and format conversion through the Rust `image` crate.
+11. Video module with typed FFmpeg command management.
+12. API routes for upload, query, task creation, task status, and link generation.
+13. Worker runtime for pending task polling, claiming, processing, upload, and manifest updates.
+14. Observability initialization.
+15. CLI entry point named `mediaforge`.
+
+Not completed:
+
+1. libvips integration.
+2. Image and text watermark execution.
+3. SQLite cache crate.
+4. Docker and Kubernetes deployment assets.
+5. S3 integration tests against a live provider or MinIO.
+6. End-to-end FFmpeg tests with sample media.
 
 Each implementation task should be independently buildable and committed separately.
 
 ## 6. Recommended First Implementation Slice
 
-When Step 4 is approved, the lowest-risk first slice is:
+Recommended next implementation slice:
 
-1. Workspace setup.
-2. Shared types.
-3. Core identity and storage key logic.
-4. Unit tests for Resource ID, Result ID, Task ID, and prefix generation.
+1. Add Dockerfile with FFmpeg and libvips runtime dependencies.
+2. Add MinIO-based integration tests.
+3. Add libvips-backed image processing path.
+4. Add watermark support.
+5. Add end-to-end API upload tests.
 
-This creates the foundation for deduplication before adding HTTP, S3, image, or video processing.
+The current foundation already supports deterministic Resource IDs, Result IDs, Task IDs, manifests, tasks, links, API, and worker runtime.
 
 ## 7. Risks and Unknowns
 
@@ -188,7 +237,6 @@ Performance:
 
 Do not:
 
-- Add Rust implementation code without explicit Step 4 approval.
 - Add a database dependency as a source of truth.
 - Store media permanently on local disk.
 - Scatter configuration across modules.

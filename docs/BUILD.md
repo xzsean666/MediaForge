@@ -4,11 +4,11 @@ Version: 1.0
 
 This document describes how MediaForge should be built, configured, and run.
 
-Current repository state: documentation and architecture are being prepared. Rust implementation code has not been added yet.
+Current repository state: a Rust workspace MVP exists with API, worker, storage, manifest, task, link, ingest, image, video, observability, and CLI crates.
 
 ## 1. Prerequisites
 
-Required for implementation:
+Required for production-style runtime:
 
 - Rust stable toolchain.
 - Cargo.
@@ -28,15 +28,16 @@ Optional:
 - Kubernetes cluster for deployment validation.
 - CDN account for public delivery tests.
 
-## 2. Planned Rust Workspace
+## 2. Rust Workspace
 
-The planned workspace structure is defined in `docs/ARCHITECTURE.md`.
+The workspace structure is defined in `docs/ARCHITECTURE.md`.
 
-Expected top-level workspace:
+Current top-level workspace:
 
 ```text
 Cargo.toml
 crates/
+  mediaforge-cli/
   mediaforge-api/
   mediaforge-worker/
   mediaforge-core/
@@ -49,15 +50,14 @@ crates/
   mediaforge-video/
   mediaforge-tasks/
   mediaforge-links/
-  mediaforge-cache/
   mediaforge-observability/
 ```
 
-No Rust crates exist yet. They should be created only during Step 4 after explicit user approval.
+`mediaforge-cache` remains optional and is not wired into the current MVP.
 
-## 3. Planned Build Commands
+## 3. Build Commands
 
-After implementation exists, standard commands should be:
+Standard verification commands:
 
 ```text
 cargo fmt --all
@@ -68,7 +68,7 @@ cargo build --workspace --release
 
 The project should keep these commands working as the baseline verification flow.
 
-## 4. Planned Runtime Modes
+## 4. Runtime Modes
 
 MediaForge should support:
 
@@ -85,10 +85,11 @@ Mode behavior:
 - `combined`: runs API and worker in one process.
 
 The exact CLI may change during implementation, but the three runtime modes must remain explicit.
+The current CLI binary is `mediaforge`.
 
 ## 5. Planned Configuration
 
-All configuration must be centralized in the future `mediaforge-config` crate.
+All configuration is centralized in the `mediaforge-config` crate.
 
 Expected environment variables:
 
@@ -102,6 +103,9 @@ MEDIAFORGE_S3_BUCKET=mediaforge
 MEDIAFORGE_S3_ACCESS_KEY_ID=replace-me
 MEDIAFORGE_S3_SECRET_ACCESS_KEY=replace-me
 MEDIAFORGE_S3_FORCE_PATH_STYLE=true|false
+
+MEDIAFORGE_STORAGE_BACKEND=s3|filesystem
+MEDIAFORGE_FILESYSTEM_STORAGE_ROOT=/tmp/mediaforge-object-store
 
 MEDIAFORGE_CDN_BASE_URL=https://cdn.example.com
 MEDIAFORGE_LINK_SIGNING_SECRET=replace-me
@@ -120,9 +124,27 @@ MEDIAFORGE_LOG_LEVEL=info
 
 Secrets must not be committed to the repository.
 
-## 6. Planned Local Development Flow
+The `filesystem` storage backend is for local development and tests only. Production deployments must use S3-compatible object storage.
 
-After implementation exists:
+## 6. Local Development Flow
+
+For a local filesystem-backed smoke test:
+
+```text
+export MEDIAFORGE_STORAGE_BACKEND=filesystem
+export MEDIAFORGE_FILESYSTEM_STORAGE_ROOT=/tmp/mediaforge-object-store
+export MEDIAFORGE_CDN_BASE_URL=http://localhost:8080/local-cdn
+export MEDIAFORGE_LINK_SIGNING_SECRET=development-secret
+cargo run -p mediaforge-cli -- combined
+```
+
+Then in another shell:
+
+```text
+curl http://127.0.0.1:8080/health
+```
+
+For S3-compatible local development:
 
 1. Start local S3-compatible storage.
 2. Create the configured bucket.
@@ -134,6 +156,19 @@ After implementation exists:
 8. Start or verify worker processing.
 9. Query the Resource ID through the API.
 10. Generate public, temporary, and signed links.
+
+Current API routes:
+
+```text
+GET  /health
+POST /v1/images/upload
+POST /v1/videos/upload
+GET  /v1/resources/{resource_id}
+POST /v1/resources/{resource_id}/image
+POST /v1/resources/{resource_id}/video
+POST /v1/resources/{resource_id}/links
+GET  /v1/tasks/{task_id}
+```
 
 ## 7. Object Storage Setup Expectations
 
@@ -199,7 +234,7 @@ No PersistentVolume should be required for durable media state.
 
 ## 12. Verification Requirements
 
-Once implementation begins, every major module should have focused tests:
+Every major module should keep focused tests:
 
 - Resource ID generation.
 - Result ID generation.
@@ -229,12 +264,13 @@ End-to-end tests should cover:
 
 ## 13. Current Limitations
 
-At this documentation stage:
+Current MVP limitations:
 
-- There is no `Cargo.toml`.
-- There are no Rust crates.
-- There is no runnable binary.
-- Build commands are planned commands, not currently executable.
+- Image resize, crop, rotate, and format conversion are implemented through the Rust `image` crate.
+- Image and text watermark operations currently return explicit unsupported errors.
+- libvips integration is not implemented yet.
+- FFmpeg execution is implemented, but runtime codec support depends on the installed FFmpeg build.
+- Uploads are streamed to temporary disk during ingest, then uploaded to storage.
+- SQLite cache remains optional and is not implemented in the current MVP.
 
-Implementation must wait until the user explicitly requests Step 4.
-
+Production use still requires S3-compatible object storage, FFmpeg, and image backend validation in the target runtime image.

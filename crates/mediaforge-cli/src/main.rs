@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = AppConfig::from_env()?;
     mediaforge_observability::init_tracing(&config.log_level);
 
-    let command = cli.command.unwrap_or_else(|| match config.runtime_mode {
+    let command = cli.command.unwrap_or(match config.runtime_mode {
         RuntimeMode::Api => Command::Api,
         RuntimeMode::Worker => Command::Worker,
         RuntimeMode::Combined => Command::Combined,
@@ -73,5 +73,5 @@ async fn run_combined(config: AppConfig) -> Result<(), Box<dyn Error + Send + Sy
 }
 
 fn boxed_error(message: String) -> Box<dyn Error + Send + Sync> {
-    Box::new(std::io::Error::new(std::io::ErrorKind::Other, message))
+    Box::new(std::io::Error::other(message))
 }

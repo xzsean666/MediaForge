@@ -82,6 +82,7 @@ The intended Rust project structure is:
 |   `-- nextsession.md
 |-- Cargo.toml
 |-- crates/
+|   |-- mediaforge-cli/
 |   |-- mediaforge-api/
 |   |-- mediaforge-worker/
 |   |-- mediaforge-core/
@@ -104,6 +105,8 @@ The intended Rust project structure is:
 ```
 
 The `crates/` layout is preferred over a large single crate because each crate can be understood and tested in isolation.
+
+`mediaforge-cli` is the command-line entry point. It selects `api`, `worker`, or `combined` mode and delegates behavior to the API and worker crates.
 
 ## 3. Module Breakdown
 
@@ -143,6 +146,36 @@ Rules:
 - Contains route definitions and request validation only.
 - Does not contain image, video, storage, or hashing logic.
 - Does not depend on local process state for request correctness.
+
+### 3.1.1 `mediaforge-cli`
+
+Purpose:
+
+Command-line entry point for running MediaForge.
+
+Input:
+
+- CLI subcommand: `api`, `worker`, or `combined`.
+- Centralized runtime configuration from `mediaforge-config`.
+
+Output:
+
+- Running API server.
+- Running worker loop.
+- Combined API and worker runtime.
+
+Dependencies:
+
+- `mediaforge-config`
+- `mediaforge-api`
+- `mediaforge-worker`
+- `mediaforge-observability`
+
+Rules:
+
+- Contains process startup only.
+- Does not contain API route logic, task logic, storage logic, or media processing logic.
+- Runtime mode must remain explicit.
 
 ### 3.2 `mediaforge-worker`
 
@@ -294,6 +327,7 @@ Rules:
 - This is the only module that talks directly to object storage.
 - Bucket names, endpoints, regions, credentials, and path style settings come from configuration.
 - Storage keys are accepted from `mediaforge-core`; they are not invented ad hoc.
+- A filesystem backend may exist only for local development and tests. Production durable media storage must use S3-compatible object storage.
 
 ### 3.7 `mediaforge-ingest`
 
@@ -818,4 +852,3 @@ Current external documentation links are stored separately in `docs/EXTERNAL_DOC
 4. Strict prevention of duplicate video processing may require a provider that supports reliable conditional object creation or a future optional queue backend.
 5. HLS segment naming and cache headers need careful CDN compatibility testing.
 6. AVIF and H265 support may depend on system libraries and FFmpeg licensing/build options.
-
