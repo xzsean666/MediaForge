@@ -1,0 +1,512 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+use mediaforge_config::{AppConfig, S3Config, StorageBackend};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+pub type DynObjectStorage = Arc<dyn ObjectStorage>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("object not found: {0}")]
+    NotFound(String),
+    #[error("invalid object key: {0}")]
+    InvalidObjectKey(String),
+    #[error("filesystem storage error: {0}")]
+    Filesystem(#[from] std::io::Error),
+    #[error("s3 storage error: {0}")]
+    S3(String),
+    #[error("presign error: {0}")]
+    Presign(String),
+}
+
+pub type StorageResult<T> = Result<T, StorageError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutObjectRequest {
+    pub key: String,
+    pub bytes: Bytes,
+    pub content_type: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObjectMetadata {
+    pub key: String,
+    pub size_bytes: u64,
+    pub content_type: Option<String>,
+}
+
+#[async_trait]
+pub trait ObjectStorage: Send + Sync {
+    async fn put_object(&self, request: PutObjectRequest) -> StorageResult<()>;
+    async fn put_object_if_absent(&self, request: PutObjectRequest) -> StorageResult<bool>;
+    async fn get_object(&self, key: &str) -> StorageResult<Bytes>;
+    async fn object_metadata(&self, key: &str) -> StorageResult<StoredObjectMetadata>;
+    async fn object_exists(&self, key: &str) -> StorageResult<bool>;
+    async fn delete_object(&self, key: &str) -> StorageResult<()>;
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>>;
+    async fn presign_get_url(&self, key: &str, expires_in: Duration) -> StorageResult<String>;
+}
+
+pub async fn create_object_storage(config: &AppConfig) -> StorageResult<DynObjectStorage> {
+    match config.storage.backend {
+        StorageBackend::S3 => Ok(Arc::new(
+            S3ObjectStorage::from_config(&config.storage.s3).await?,
+        )),
+        StorageBackend::Filesystem => Ok(Arc::new(FilesystemObjectStorage::new(
+            config.storage.filesystem_root.clone(),
+        ))),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FilesystemObjectStorage {
+    root: PathBuf,
+}
+
+impl FilesystemObjectStorage {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn path_for_key(&self, key: &str) -> StorageResult<PathBuf> {
+        validate_object_key(key)?;
+        Ok(self.root.join(key))
+    }
+}
+
+#[async_trait]
+impl ObjectStorage for FilesystemObjectStorage {
+    async fn put_object(&self, request: PutObjectRequest) -> StorageResult<()> {
+        let path = self.path_for_key(&request.key)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, request.bytes).await?;
+        Ok(())
+    }
+
+    async fn put_object_if_absent(&self, request: PutObjectRequest) -> StorageResult<bool> {
+        use tokio::io::AsyncWriteExt;
+
+        let path = self.path_for_key(&request.key)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let open_result = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await;
+
+        let mut file = match open_result {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(StorageError::Filesystem(error)),
+        };
+
+        file.write_all(&request.bytes).await?;
+        file.flush().await?;
+        Ok(true)
+    }
+
+    async fn get_object(&self, key: &str) -> StorageResult<Bytes> {
+        let path = self.path_for_key(key)?;
+        match tokio::fs::read(path).await {
+            Ok(bytes) => Ok(Bytes::from(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn object_metadata(&self, key: &str) -> StorageResult<StoredObjectMetadata> {
+        let path = self.path_for_key(key)?;
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) => Ok(StoredObjectMetadata {
+                key: key.to_string(),
+                size_bytes: metadata.len(),
+                content_type: None,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn object_exists(&self, key: &str) -> StorageResult<bool> {
+        let path = self.path_for_key(key)?;
+        match tokio::fs::metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn delete_object(&self, key: &str) -> StorageResult<()> {
+        let path = self.path_for_key(key)?;
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        validate_object_key(prefix)?;
+        let start = self.root.join(prefix);
+        if tokio::fs::metadata(&start).await.is_err() {
+            return Ok(Vec::new());
+        }
+
+        let root = self.root.clone();
+        let mut pending = vec![start];
+        let mut keys = Vec::new();
+
+        while let Some(directory) = pending.pop() {
+            let mut entries = tokio::fs::read_dir(directory).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let metadata = entry.metadata().await?;
+                if metadata.is_dir() {
+                    pending.push(path);
+                } else if metadata.is_file() {
+                    keys.push(path_to_key(&root, &path)?);
+                }
+            }
+        }
+
+        keys.sort();
+        Ok(keys)
+    }
+
+    async fn presign_get_url(&self, key: &str, _expires_in: Duration) -> StorageResult<String> {
+        let path = self.path_for_key(key)?;
+        Ok(format!("file://{}", path.display()))
+    }
+}
+
+#[derive(Clone)]
+pub struct S3ObjectStorage {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+}
+
+impl S3ObjectStorage {
+    pub async fn from_config(config: &S3Config) -> StorageResult<Self> {
+        use aws_config::BehaviorVersion;
+        use aws_credential_types::Credentials;
+        use aws_types::region::Region;
+
+        let mut loader = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(config.region.clone()));
+
+        if let Some(endpoint) = &config.endpoint {
+            loader = loader.endpoint_url(endpoint);
+        }
+
+        if let (Some(access_key_id), Some(secret_access_key)) =
+            (&config.access_key_id, &config.secret_access_key)
+        {
+            loader = loader.credentials_provider(Credentials::new(
+                access_key_id,
+                secret_access_key,
+                None,
+                None,
+                "mediaforge",
+            ));
+        }
+
+        let shared_config = loader.load().await;
+        let s3_config = aws_sdk_s3::config::Builder::from(&shared_config)
+            .force_path_style(config.force_path_style)
+            .build();
+
+        Ok(Self {
+            client: aws_sdk_s3::Client::from_conf(s3_config),
+            bucket: config.bucket.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl ObjectStorage for S3ObjectStorage {
+    async fn put_object(&self, request: PutObjectRequest) -> StorageResult<()> {
+        use aws_sdk_s3::primitives::ByteStream;
+        use std::collections::HashMap;
+
+        validate_object_key(&request.key)?;
+        let metadata: HashMap<String, String> = request.metadata.into_iter().collect();
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&request.key)
+            .set_content_type(request.content_type)
+            .set_metadata(Some(metadata))
+            .body(ByteStream::from(request.bytes.to_vec()))
+            .send()
+            .await
+            .map_err(|error| StorageError::S3(error.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn put_object_if_absent(&self, request: PutObjectRequest) -> StorageResult<bool> {
+        use aws_sdk_s3::primitives::ByteStream;
+        use std::collections::HashMap;
+
+        validate_object_key(&request.key)?;
+        let metadata: HashMap<String, String> = request.metadata.into_iter().collect();
+
+        let result = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&request.key)
+            .if_none_match("*")
+            .set_content_type(request.content_type)
+            .set_metadata(Some(metadata))
+            .body(ByteStream::from(request.bytes.to_vec()))
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) if looks_like_precondition_failure(&error.to_string()) => Ok(false),
+            Err(error) => Err(StorageError::S3(error.to_string())),
+        }
+    }
+
+    async fn get_object(&self, key: &str) -> StorageResult<Bytes> {
+        validate_object_key(key)?;
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                if looks_like_not_found(&error.to_string()) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::S3(error.to_string())
+                }
+            })?;
+
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .map_err(|error| StorageError::S3(error.to_string()))?
+            .into_bytes();
+        Ok(bytes)
+    }
+
+    async fn object_metadata(&self, key: &str) -> StorageResult<StoredObjectMetadata> {
+        validate_object_key(key)?;
+        let output = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                if looks_like_not_found(&error.to_string()) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::S3(error.to_string())
+                }
+            })?;
+
+        Ok(StoredObjectMetadata {
+            key: key.to_string(),
+            size_bytes: output.content_length().unwrap_or_default() as u64,
+            content_type: output.content_type().map(ToString::to_string),
+        })
+    }
+
+    async fn object_exists(&self, key: &str) -> StorageResult<bool> {
+        validate_object_key(key)?;
+        let result = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) if looks_like_not_found(&error.to_string()) => Ok(false),
+            Err(error) => Err(StorageError::S3(error.to_string())),
+        }
+    }
+
+    async fn delete_object(&self, key: &str) -> StorageResult<()> {
+        validate_object_key(key)?;
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| StorageError::S3(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        validate_object_key(prefix)?;
+        let mut keys = Vec::new();
+        let mut continuation_token = None;
+
+        loop {
+            let response = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix)
+                .set_continuation_token(continuation_token)
+                .send()
+                .await
+                .map_err(|error| StorageError::S3(error.to_string()))?;
+
+            for object in response.contents() {
+                if let Some(key) = object.key() {
+                    keys.push(key.to_string());
+                }
+            }
+
+            continuation_token = response.next_continuation_token().map(ToString::to_string);
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(keys)
+    }
+
+    async fn presign_get_url(&self, key: &str, expires_in: Duration) -> StorageResult<String> {
+        use aws_sdk_s3::presigning::PresigningConfig;
+
+        validate_object_key(key)?;
+        let presigning_config = PresigningConfig::expires_in(expires_in)
+            .map_err(|error| StorageError::Presign(error.to_string()))?;
+        let presigned_request = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|error| StorageError::Presign(error.to_string()))?;
+
+        Ok(presigned_request.uri().to_string())
+    }
+}
+
+fn validate_object_key(key: &str) -> StorageResult<()> {
+    if key.is_empty()
+        || key.starts_with('/')
+        || key.contains('\\')
+        || key.split('/').any(|part| part == "..")
+    {
+        return Err(StorageError::InvalidObjectKey(key.to_string()));
+    }
+    Ok(())
+}
+
+fn path_to_key(root: &Path, path: &Path) -> StorageResult<String> {
+    let relative_path = path
+        .strip_prefix(root)
+        .map_err(|_| StorageError::InvalidObjectKey(path.display().to_string()))?;
+    Ok(relative_path.to_string_lossy().replace('\\', "/"))
+}
+
+fn looks_like_not_found(error: &str) -> bool {
+    error.contains("NotFound")
+        || error.contains("NoSuchKey")
+        || error.contains("404")
+        || error.contains("not found")
+}
+
+fn looks_like_precondition_failure(error: &str) -> bool {
+    error.contains("PreconditionFailed")
+        || error.contains("Precondition Failed")
+        || error.contains("412")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn filesystem_put_if_absent_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+        let request = PutObjectRequest {
+            key: "media/example.txt".to_string(),
+            bytes: Bytes::from_static(b"first"),
+            content_type: Some("text/plain".to_string()),
+            metadata: BTreeMap::new(),
+        };
+
+        assert!(storage.put_object_if_absent(request.clone()).await.unwrap());
+        assert!(!storage.put_object_if_absent(request).await.unwrap());
+        assert_eq!(
+            storage.get_object("media/example.txt").await.unwrap(),
+            Bytes::from_static(b"first")
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_lists_prefix_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+
+        storage
+            .put_object(PutObjectRequest {
+                key: "tasks/pending/a.json".to_string(),
+                bytes: Bytes::from_static(b"{}"),
+                content_type: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        storage
+            .put_object(PutObjectRequest {
+                key: "tasks/pending/nested/b.json".to_string(),
+                bytes: Bytes::from_static(b"{}"),
+                content_type: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+
+        let keys = storage.list_keys("tasks/pending").await.unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "tasks/pending/a.json".to_string(),
+                "tasks/pending/nested/b.json".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_rejects_parent_directory_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+
+        let error = storage.get_object("../secret").await.unwrap_err();
+        assert!(matches!(error, StorageError::InvalidObjectKey(_)));
+    }
+}

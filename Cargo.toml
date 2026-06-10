@@ -3,6 +3,10 @@ members = [
     "crates/mediaforge-types",
     "crates/mediaforge-core",
     "crates/mediaforge-config",
+    "crates/mediaforge-storage",
+    "crates/mediaforge-manifest",
+    "crates/mediaforge-tasks",
+    "crates/mediaforge-links",
 ]
 resolver = "2"
 
@@ -40,4 +44,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
-
