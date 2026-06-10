@@ -43,6 +43,7 @@ pub struct AppConfig {
     pub temp_directory: PathBuf,
     pub ffmpeg_path: String,
     pub ffprobe_path: String,
+    pub ffmpeg_threads: Option<usize>,
     pub worker_concurrency: usize,
     pub worker_poll_interval: Duration,
     pub sqlite_cache_path: Option<PathBuf>,
@@ -113,6 +114,7 @@ impl AppConfig {
             temp_directory: PathBuf::from(env_string("MEDIAFORGE_TEMP_DIR", "/tmp/mediaforge")),
             ffmpeg_path: env_string("MEDIAFORGE_FFMPEG_PATH", "ffmpeg"),
             ffprobe_path: env_string("MEDIAFORGE_FFPROBE_PATH", "ffprobe"),
+            ffmpeg_threads: optional_usize("MEDIAFORGE_FFMPEG_THREADS")?,
             worker_concurrency,
             worker_poll_interval: Duration::from_secs(poll_interval_seconds),
             sqlite_cache_path: optional_env("MEDIAFORGE_SQLITE_CACHE_PATH").map(PathBuf::from),
@@ -127,6 +129,12 @@ fn env_string(name: &'static str, default_value: &'static str) -> String {
 
 fn optional_env(name: &'static str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn optional_usize(name: &'static str) -> ConfigResult<Option<usize>> {
+    optional_env(name)
+        .map(|value| parse_usize(name, value))
+        .transpose()
 }
 
 fn required_when_s3(

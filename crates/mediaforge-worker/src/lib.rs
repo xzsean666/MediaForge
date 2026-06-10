@@ -56,6 +56,16 @@ pub async fn run_worker_loop(config: AppConfig) -> WorkerResult<()> {
     }
 }
 
+pub async fn process_single_task(
+    config: AppConfig,
+    task_id: TaskId,
+    worker_id: String,
+) -> WorkerResult<()> {
+    let storage = create_object_storage(&config).await?;
+    let runtime = WorkerRuntime::new(config, storage);
+    runtime.process_task_by_id(&task_id, &worker_id).await
+}
+
 #[derive(Clone)]
 pub struct WorkerRuntime {
     config: AppConfig,
@@ -71,6 +81,7 @@ impl WorkerRuntime {
             video_processor: FfmpegProcessor::new(
                 config.ffmpeg_path.clone(),
                 config.ffprobe_path.clone(),
+                config.ffmpeg_threads,
             ),
             manifests: ManifestRepository::new(storage.clone()),
             tasks: TaskRepository::new(storage.clone()),
@@ -108,6 +119,24 @@ impl WorkerRuntime {
         }
 
         Ok(processed_count)
+    }
+
+    pub async fn process_task_by_id(&self, task_id: &TaskId, worker_id: &str) -> WorkerResult<()> {
+        let status = self.tasks.read_status(task_id).await?;
+        if matches!(status.state, TaskState::Completed) {
+            tracing::info!(%task_id, "task already completed");
+            return Ok(());
+        }
+
+        if matches!(status.state, TaskState::Pending) {
+            let claimed = self.tasks.claim_task(task_id, worker_id).await?;
+            if !claimed {
+                tracing::info!(%task_id, "task already has a lease; processing idempotently");
+            }
+        }
+
+        let task = self.tasks.read_descriptor(task_id).await?;
+        self.process_task(&task).await
     }
 
     async fn process_task(&self, task: &TaskDescriptor) -> WorkerResult<()> {

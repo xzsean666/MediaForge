@@ -165,6 +165,8 @@ Completed:
 13. Worker runtime for pending task polling, claiming, processing, upload, and manifest updates.
 14. Observability initialization.
 15. CLI entry point named `mediaforge`.
+16. CPU-limited Backblaze B2 E2E script.
+17. Backblaze B2 fallback for providers that do not implement conditional `If-None-Match` writes.
 
 Not completed:
 
@@ -172,8 +174,11 @@ Not completed:
 2. Image and text watermark execution.
 3. SQLite cache crate.
 4. Docker and Kubernetes deployment assets.
-5. S3 integration tests against a live provider or MinIO.
-6. End-to-end FFmpeg tests with sample media.
+5. MinIO-specific integration tests.
+6. CI automation for real-object-storage E2E tests.
+7. Larger FFmpeg sample media coverage across codecs and resolutions.
+
+Update: a real Backblaze B2 E2E script now exists at `scripts/e2e-b2.sh` and has been run successfully against B2. MinIO-specific integration tests are still pending.
 
 Each implementation task should be independently buildable and committed separately.
 
@@ -221,6 +226,7 @@ Performance:
 
 - Large media uploads must stream where possible.
 - Avoid loading full videos or large images into memory.
+- Local development should keep Cargo build jobs at 1 and FFmpeg thread count explicit to avoid starving the IDE.
 
 ## 8. Next Actions for the Next AI Session
 

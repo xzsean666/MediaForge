@@ -43,6 +43,7 @@ Future AI sessions must check this file before using external APIs. If a link ch
 | Cloudflare R2 S3 API | Cloudflare R2 S3-compatible behavior | https://developers.cloudflare.com/r2/api/s3/api/ |
 | Cloudflare R2 presigned URLs | R2 temporary object access | https://developers.cloudflare.com/r2/api/s3/presigned-urls/ |
 | Backblaze B2 S3-compatible API | Backblaze B2 S3 compatibility | https://www.backblaze.com/docs/cloud-storage-s3-compatible-api |
+| Backblaze B2 authorize account | Discover `apiInfo.storageApi.s3ApiUrl` for B2 E2E tests | https://www.backblaze.com/apidocs/b2-authorize-account |
 | MinIO S3 API compatibility | MinIO S3-compatible behavior | https://docs.min.io/aistor/developers/s3-api-compatibility/ |
 | Wasabi S3 API Reference | Wasabi S3-compatible behavior | https://docs.wasabi.com/apidocs/wasabi-api |
 | DigitalOcean Spaces API Reference | Spaces REST/S3-compatible API | https://docs.digitalocean.com/reference/api/spaces/ |
@@ -114,4 +115,3 @@ Security note:
 S3-compatible providers are not identical. Before relying on a provider for task leases, presigned URLs, metadata behavior, multipart uploads, or conditional writes, verify the current provider-specific documentation.
 
 Task claiming should prefer S3 conditional writes when available. If the provider does not support reliable conditional object creation, MediaForge must remain correct through deterministic object keys and idempotent manifest updates.
-

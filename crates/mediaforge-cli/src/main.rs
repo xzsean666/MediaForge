@@ -15,6 +15,11 @@ enum Command {
     Api,
     Worker,
     Combined,
+    ProcessTask {
+        task_id: String,
+        #[arg(long, default_value = "manual-worker")]
+        worker_id: String,
+    },
 }
 
 #[tokio::main]
@@ -33,6 +38,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Command::Api => mediaforge_api::run_api(config).await?,
         Command::Worker => mediaforge_worker::run_worker_loop(config).await?,
         Command::Combined => run_combined(config).await?,
+        Command::ProcessTask { task_id, worker_id } => {
+            mediaforge_worker::process_single_task(
+                config,
+                mediaforge_types::TaskId(task_id),
+                worker_id,
+            )
+            .await?
+        }
     }
 
     Ok(())

@@ -2090,6 +2090,7 @@ dependencies = [
  "mediaforge-api",
  "mediaforge-config",
  "mediaforge-observability",
+ "mediaforge-types",
  "mediaforge-worker",
  "tokio",
 ]

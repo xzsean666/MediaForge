@@ -178,6 +178,7 @@ mod tests {
             temp_directory: PathBuf::from("/tmp/mediaforge"),
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
+            ffmpeg_threads: Some(1),
             worker_concurrency: 1,
             worker_poll_interval: Duration::from_secs(1),
             sqlite_cache_path: None,

@@ -25,13 +25,15 @@ pub type VideoProcessingResult<T> = Result<T, VideoProcessingError>;
 pub struct FfmpegProcessor {
     ffmpeg_path: String,
     ffprobe_path: String,
+    thread_count: Option<usize>,
 }
 
 impl FfmpegProcessor {
-    pub fn new(ffmpeg_path: String, ffprobe_path: String) -> Self {
+    pub fn new(ffmpeg_path: String, ffprobe_path: String, thread_count: Option<usize>) -> Self {
         Self {
             ffmpeg_path,
             ffprobe_path,
+            thread_count,
         }
     }
 
@@ -42,8 +44,12 @@ impl FfmpegProcessor {
         profile: &VideoProfile,
     ) -> VideoProcessingResult<()> {
         validate_profile(profile)?;
-        let arguments =
-            build_transcode_arguments(input_path.as_ref(), output_path.as_ref(), profile);
+        let arguments = build_transcode_arguments(
+            input_path.as_ref(),
+            output_path.as_ref(),
+            profile,
+            self.thread_count,
+        );
         run_process(&self.ffmpeg_path, &arguments).await
     }
 
@@ -60,7 +66,8 @@ impl FfmpegProcessor {
             ));
         }
 
-        let mut arguments = vec![
+        let mut arguments = base_ffmpeg_arguments(self.thread_count);
+        arguments.extend([
             "-y".to_string(),
             "-ss".to_string(),
             timestamp_seconds.to_string(),
@@ -68,7 +75,7 @@ impl FfmpegProcessor {
             input_path.as_ref().display().to_string(),
             "-frames:v".to_string(),
             "1".to_string(),
-        ];
+        ]);
 
         if output_format == ImageOutputFormat::Webp {
             arguments.push("-c:v".to_string());
@@ -87,7 +94,8 @@ impl FfmpegProcessor {
         tokio::fs::create_dir_all(output_directory.as_ref()).await?;
         let playlist = output_directory.as_ref().join("master.m3u8");
         let segment_pattern = output_directory.as_ref().join("segment-%06d.ts");
-        let arguments = vec![
+        let mut arguments = base_ffmpeg_arguments(self.thread_count);
+        arguments.extend([
             "-y".to_string(),
             "-i".to_string(),
             input_path.as_ref().display().to_string(),
@@ -104,7 +112,7 @@ impl FfmpegProcessor {
             "-hls_segment_filename".to_string(),
             segment_pattern.display().to_string(),
             playlist.display().to_string(),
-        ];
+        ]);
         run_process(&self.ffmpeg_path, &arguments).await?;
         Ok(playlist)
     }
@@ -210,14 +218,16 @@ pub fn build_transcode_arguments(
     input_path: &Path,
     output_path: &Path,
     profile: &VideoProfile,
+    thread_count: Option<usize>,
 ) -> Vec<String> {
-    let mut arguments = vec![
+    let mut arguments = base_ffmpeg_arguments(thread_count);
+    arguments.extend([
         "-y".to_string(),
         "-i".to_string(),
         input_path.display().to_string(),
         "-c:v".to_string(),
         codec_name(profile.codec).to_string(),
-    ];
+    ]);
 
     if let Some(resolution) = profile.resolution {
         arguments.push("-vf".to_string());
@@ -272,6 +282,15 @@ fn codec_name(codec: VideoCodec) -> &'static str {
     }
 }
 
+fn base_ffmpeg_arguments(thread_count: Option<usize>) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if let Some(thread_count) = thread_count {
+        arguments.push("-threads".to_string());
+        arguments.push(thread_count.max(1).to_string());
+    }
+    arguments
+}
+
 async fn run_process(executable: &str, arguments: &[String]) -> VideoProcessingResult<()> {
     let output = Command::new(executable).args(arguments).output().await?;
     if output.status.success() {
@@ -302,8 +321,12 @@ mod tests {
             Path::new("/tmp/input.mp4"),
             Path::new("/tmp/output.mp4"),
             &profile,
+            Some(1),
         );
 
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-threads" && pair[1] == "1"));
         assert!(arguments.contains(&"libx264".to_string()));
         assert!(arguments.contains(&"scale=-2:720".to_string()));
         assert!(arguments.contains(&"+faststart".to_string()));

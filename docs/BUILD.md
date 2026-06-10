@@ -61,12 +61,21 @@ Standard verification commands:
 
 ```text
 cargo fmt --all
-cargo clippy --workspace --all-targets --all-features
-cargo test --workspace --all-features
-cargo build --workspace --release
+cargo clippy -j1 --workspace --all-targets --all-features
+cargo test -j1 --workspace --all-features -- --test-threads=1
+cargo build -j1 --workspace --release
 ```
 
 The project should keep these commands working as the baseline verification flow.
+
+This repository includes `.cargo/config.toml` with:
+
+```text
+[build]
+jobs = 1
+```
+
+Current local default is `jobs = 1`. This keeps Rust compilation from consuming all CPU cores during local development.
 
 ## 4. Runtime Modes
 
@@ -114,6 +123,7 @@ MEDIAFORGE_JWT_SECRET=replace-me
 MEDIAFORGE_TEMP_DIR=/tmp/mediaforge
 MEDIAFORGE_FFMPEG_PATH=ffmpeg
 MEDIAFORGE_FFPROBE_PATH=ffprobe
+MEDIAFORGE_FFMPEG_THREADS=1
 
 MEDIAFORGE_WORKER_CONCURRENCY=2
 MEDIAFORGE_WORKER_POLL_INTERVAL_SECONDS=5
@@ -170,7 +180,54 @@ POST /v1/resources/{resource_id}/links
 GET  /v1/tasks/{task_id}
 ```
 
-## 7. Object Storage Setup Expectations
+## 7. Backblaze B2 E2E Test
+
+The repository includes a real Backblaze B2/S3-compatible E2E script:
+
+```text
+./scripts/e2e-b2.sh
+```
+
+The script reads `.env.test` and expects:
+
+```text
+B2_APPLICATION_KEY_ID=...
+B2_APPLICATION_KEY=...
+B2_BUCKET_NAME=...
+```
+
+It uses the Backblaze B2 Native API only to discover the S3 API URL, then runs MediaForge through the S3-compatible storage backend.
+
+CPU and compile limits are enabled by default:
+
+```text
+MEDIAFORGE_E2E_CARGO_JOBS=1
+MEDIAFORGE_E2E_FFMPEG_THREADS=1
+MEDIAFORGE_E2E_NICE_LEVEL=15
+RAYON_NUM_THREADS=1
+```
+
+The script covers:
+
+- API health check.
+- Synthetic image generation.
+- Synthetic video generation.
+- Image upload to B2.
+- Duplicate image upload returning the same Resource ID.
+- Image manifest query.
+- Public link generation.
+- B2 presigned link generation.
+- Image processing task creation and execution.
+- Video upload to B2.
+- Duplicate video upload returning the same Resource ID and Task ID.
+- Default video transcode task execution.
+- HLS video task execution.
+- Screenshot, cover, HLS playlist, and HLS segment manifest verification.
+- Task status verification.
+
+On failure, the script keeps its temporary work directory and prints the API log tail.
+
+## 8. Object Storage Setup Expectations
 
 The storage provider must support:
 
@@ -187,7 +244,7 @@ Preferred for task claiming:
 
 Provider compatibility must be verified because S3-compatible services differ in edge behavior.
 
-## 8. FFmpeg Requirements
+## 9. FFmpeg Requirements
 
 FFmpeg must be available in the runtime image or host environment.
 
@@ -198,13 +255,13 @@ Required tools:
 
 Codec support depends on the FFmpeg build. H265 and AV1 support must be verified in the target runtime image before production use.
 
-## 9. libvips Requirements
+## 10. libvips Requirements
 
 libvips must be available in the runtime image or host environment for the preferred image processing path.
 
 The implementation should detect unavailable libvips behavior early and return clear startup or processing errors.
 
-## 10. Docker Deployment Direction
+## 11. Docker Deployment Direction
 
 Docker support should eventually provide:
 
@@ -217,7 +274,7 @@ Docker support should eventually provide:
 
 The image should not include long-term media storage.
 
-## 11. Kubernetes Deployment Direction
+## 12. Kubernetes Deployment Direction
 
 Kubernetes support should eventually provide:
 
@@ -232,7 +289,7 @@ Kubernetes support should eventually provide:
 
 No PersistentVolume should be required for durable media state.
 
-## 12. Verification Requirements
+## 13. Verification Requirements
 
 Every major module should keep focused tests:
 
@@ -262,7 +319,7 @@ End-to-end tests should cover:
 - HLS output availability.
 - Resource query from manifest.
 
-## 13. Current Limitations
+## 14. Current Limitations
 
 Current MVP limitations:
 

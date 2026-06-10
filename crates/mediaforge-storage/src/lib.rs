@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use mediaforge_config::{AppConfig, S3Config, StorageBackend};
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Display};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -253,7 +254,7 @@ impl ObjectStorage for S3ObjectStorage {
             .body(ByteStream::from(request.bytes.to_vec()))
             .send()
             .await
-            .map_err(|error| StorageError::S3(error.to_string()))?;
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?;
 
         Ok(())
     }
@@ -263,6 +264,7 @@ impl ObjectStorage for S3ObjectStorage {
         use std::collections::HashMap;
 
         validate_object_key(&request.key)?;
+        let fallback_request = request.clone();
         let metadata: HashMap<String, String> = request.metadata.into_iter().collect();
 
         let result = self
@@ -279,8 +281,21 @@ impl ObjectStorage for S3ObjectStorage {
 
         match result {
             Ok(_) => Ok(true),
-            Err(error) if looks_like_precondition_failure(&error.to_string()) => Ok(false),
-            Err(error) => Err(StorageError::S3(error.to_string())),
+            Err(error) => {
+                let description = describe_sdk_error(&error);
+                if looks_like_precondition_failure(&description) {
+                    Ok(false)
+                } else if looks_like_not_implemented(&description) {
+                    if self.object_exists(&fallback_request.key).await? {
+                        Ok(false)
+                    } else {
+                        self.put_object(fallback_request).await?;
+                        Ok(true)
+                    }
+                } else {
+                    Err(StorageError::S3(description))
+                }
+            }
         }
     }
 
@@ -294,10 +309,11 @@ impl ObjectStorage for S3ObjectStorage {
             .send()
             .await
             .map_err(|error| {
-                if looks_like_not_found(&error.to_string()) {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
                     StorageError::NotFound(key.to_string())
                 } else {
-                    StorageError::S3(error.to_string())
+                    StorageError::S3(description)
                 }
             })?;
 
@@ -305,7 +321,7 @@ impl ObjectStorage for S3ObjectStorage {
             .body
             .collect()
             .await
-            .map_err(|error| StorageError::S3(error.to_string()))?
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?
             .into_bytes();
         Ok(bytes)
     }
@@ -320,10 +336,11 @@ impl ObjectStorage for S3ObjectStorage {
             .send()
             .await
             .map_err(|error| {
-                if looks_like_not_found(&error.to_string()) {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
                     StorageError::NotFound(key.to_string())
                 } else {
-                    StorageError::S3(error.to_string())
+                    StorageError::S3(description)
                 }
             })?;
 
@@ -346,8 +363,14 @@ impl ObjectStorage for S3ObjectStorage {
 
         match result {
             Ok(_) => Ok(true),
-            Err(error) if looks_like_not_found(&error.to_string()) => Ok(false),
-            Err(error) => Err(StorageError::S3(error.to_string())),
+            Err(error) => {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
+                    Ok(false)
+                } else {
+                    Err(StorageError::S3(description))
+                }
+            }
         }
     }
 
@@ -359,7 +382,7 @@ impl ObjectStorage for S3ObjectStorage {
             .key(key)
             .send()
             .await
-            .map_err(|error| StorageError::S3(error.to_string()))?;
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?;
         Ok(())
     }
 
@@ -377,7 +400,7 @@ impl ObjectStorage for S3ObjectStorage {
                 .set_continuation_token(continuation_token)
                 .send()
                 .await
-                .map_err(|error| StorageError::S3(error.to_string()))?;
+                .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?;
 
             for object in response.contents() {
                 if let Some(key) = object.key() {
@@ -399,7 +422,7 @@ impl ObjectStorage for S3ObjectStorage {
 
         validate_object_key(key)?;
         let presigning_config = PresigningConfig::expires_in(expires_in)
-            .map_err(|error| StorageError::Presign(error.to_string()))?;
+            .map_err(|error| StorageError::Presign(describe_sdk_error(&error)))?;
         let presigned_request = self
             .client
             .get_object()
@@ -407,7 +430,7 @@ impl ObjectStorage for S3ObjectStorage {
             .key(key)
             .presigned(presigning_config)
             .await
-            .map_err(|error| StorageError::Presign(error.to_string()))?;
+            .map_err(|error| StorageError::Presign(describe_sdk_error(&error)))?;
 
         Ok(presigned_request.uri().to_string())
     }
@@ -442,6 +465,20 @@ fn looks_like_precondition_failure(error: &str) -> bool {
     error.contains("PreconditionFailed")
         || error.contains("Precondition Failed")
         || error.contains("412")
+}
+
+fn looks_like_not_implemented(error: &str) -> bool {
+    error.contains("NotImplemented") || error.contains("not implemented")
+}
+
+fn describe_sdk_error(error: &(impl Debug + Display)) -> String {
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    if debug == display {
+        display
+    } else {
+        format!("{display}; debug={debug}")
+    }
 }
 
 #[cfg(test)]
