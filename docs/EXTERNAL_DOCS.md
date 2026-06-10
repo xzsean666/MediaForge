@@ -108,6 +108,8 @@ Security note:
 | Integration | Purpose | Official docs |
 | --- | --- | --- |
 | Docker docs | Container build and runtime | https://docs.docker.com/ |
+| Dockerfile reference | Dockerfile syntax and BuildKit features | https://docs.docker.com/reference/dockerfile/ |
+| Docker multi-platform builds | Buildx amd64/arm64 image builds | https://docs.docker.com/build/building/multi-platform/ |
 | Kubernetes docs | Cluster deployment and scaling | https://kubernetes.io/docs/home/ |
 
 ## Provider Compatibility Notes

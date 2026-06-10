@@ -261,18 +261,41 @@ libvips must be available in the runtime image or host environment for the prefe
 
 The implementation should detect unavailable libvips behavior early and return clear startup or processing errors.
 
-## 11. Docker Deployment Direction
+## 11. Docker Deployment
 
-Docker support should eventually provide:
+Docker deployment files are now provided:
 
-- Runtime image with MediaForge binary.
-- FFmpeg installed.
-- libvips installed.
-- Non-root runtime user.
+```text
+Dockerfile
+Dockerfile.prebuilt
+Dockerfile.prebuilt.cn
+docker-compose.yml
+docker-compose.prebuilt.yml
+docker-compose.prebuilt.cn.yml
+scripts/build-prebuilt-binary.sh
+docs/RUST_DOCKER_DEPLOYMENT.md
+```
+
+The Docker images include:
+
+- MediaForge binary.
+- FFmpeg and ffprobe.
+- libvips runtime packages.
+- Non-root `mediaforge` user.
 - Writable temporary directory.
 - Environment-variable configuration.
+- Healthcheck against `/health`.
+
+The Docker setup supports:
+
+```text
+linux/amd64
+linux/arm64
+```
 
 The image should not include long-term media storage.
+
+See `docs/RUST_DOCKER_DEPLOYMENT.md` for buildx, prebuilt binary, China mirror, and compose usage.
 
 ## 12. Kubernetes Deployment Direction
 

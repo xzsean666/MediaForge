@@ -1,0 +1,13 @@
+.git
+.gitignore
+.cargo
+target
+tmp
+cache
+out
+data
+*.log
+.env
+.env.*
+!.env.example
+

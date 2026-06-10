@@ -167,6 +167,8 @@ Completed:
 15. CLI entry point named `mediaforge`.
 16. CPU-limited Backblaze B2 E2E script.
 17. Backblaze B2 fallback for providers that do not implement conditional `If-None-Match` writes.
+18. Docker deployment files for source build, prebuilt binary, and China mirror prebuilt runtime.
+19. Docker compose files and multi-architecture amd64/arm64 build documentation.
 
 Not completed:
 
@@ -177,6 +179,7 @@ Not completed:
 5. MinIO-specific integration tests.
 6. CI automation for real-object-storage E2E tests.
 7. Larger FFmpeg sample media coverage across codecs and resolutions.
+8. Actual Docker image build verification on a machine with Docker daemon access.
 
 Update: a real Backblaze B2 E2E script now exists at `scripts/e2e-b2.sh` and has been run successfully against B2. MinIO-specific integration tests are still pending.
 

@@ -1,0 +1,26 @@
+services:
+  mediaforge:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
+    image: ${MEDIAFORGE_IMAGE:-mediaforge:prebuilt}
+    restart: unless-stopped
+    env_file:
+      - ${MEDIAFORGE_ENV_FILE:-.env.example}
+    environment:
+      MEDIAFORGE_HTTP_BIND: 0.0.0.0:8080
+      MEDIAFORGE_TEMP_DIR: /tmp/mediaforge
+      MEDIAFORGE_FFMPEG_PATH: ffmpeg
+      MEDIAFORGE_FFPROBE_PATH: ffprobe
+      MEDIAFORGE_FFMPEG_THREADS: ${MEDIAFORGE_FFMPEG_THREADS:-1}
+      MEDIAFORGE_WORKER_CONCURRENCY: ${MEDIAFORGE_WORKER_CONCURRENCY:-1}
+    ports:
+      - "${MEDIAFORGE_PORT:-8080}:8080"
+    volumes:
+      - mediaforge-temp:/tmp/mediaforge
+      - mediaforge-object-store:/var/lib/mediaforge/object-store
+
+volumes:
+  mediaforge-temp:
+  mediaforge-object-store:
+

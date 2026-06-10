@@ -4,4 +4,5 @@
 .env.*
 !.env.example
 /tmp/
-
+/deploy/prebuilt/*
+!/deploy/prebuilt/README.md
