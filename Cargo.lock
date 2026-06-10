@@ -825,6 +825,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "byteorder-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -856,6 +862,17 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfb"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d38f2da7a0a2c4ccf0065be06397cc26a81f4e528be095826eee9d4adbb8c60f"
+dependencies = [
+ "byteorder",
+ "fnv",
+ "uuid",
 ]
 
 [[package]]
@@ -1896,6 +1913,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc150e5ce2330295b8616ce0e3f53250e53af31759a9dbedad1621ba29151847"
+dependencies = [
+ "cfb",
+]
+
+[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,16 +2090,16 @@ name = "mediaforge-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytes",
+ "chrono",
+ "mediaforge-auth",
  "mediaforge-config",
  "mediaforge-core",
- "mediaforge-image",
- "mediaforge-ingest",
  "mediaforge-links",
  "mediaforge-manifest",
  "mediaforge-storage",
  "mediaforge-tasks",
  "mediaforge-types",
+ "mediaforge-uploads",
  "serde",
  "serde_json",
  "thiserror",
@@ -2083,11 +2109,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaforge-auth"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "hmac 0.12.1",
+ "mediaforge-config",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "mediaforge-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
  "mediaforge-api",
+ "mediaforge-auth",
  "mediaforge-config",
  "mediaforge-observability",
  "mediaforge-types",
@@ -2128,7 +2169,6 @@ dependencies = [
 name = "mediaforge-ingest"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "mediaforge-core",
  "mediaforge-types",
  "mime_guess",
@@ -2136,7 +2176,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2187,7 +2226,9 @@ dependencies = [
  "aws-sdk-s3",
  "aws-types",
  "bytes",
+ "hex",
  "mediaforge-config",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2219,6 +2260,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaforge-uploads"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "mediaforge-core",
+ "mediaforge-storage",
+ "mediaforge-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mediaforge-video"
 version = "0.1.0"
 dependencies = [
@@ -2234,6 +2292,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "infer",
  "mediaforge-config",
  "mediaforge-core",
  "mediaforge-image",
@@ -2242,8 +2301,11 @@ dependencies = [
  "mediaforge-storage",
  "mediaforge-tasks",
  "mediaforge-types",
+ "mediaforge-uploads",
  "mediaforge-video",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -3219,7 +3281,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

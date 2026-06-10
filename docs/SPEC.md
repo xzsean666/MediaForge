@@ -458,3 +458,64 @@ The project is acceptable when:
 - No traditional database is required.
 - External integration docs are tracked in `docs/EXTERNAL_DOCS.md`.
 
+
+## 18. Implemented Upload, Auth, and Reliability Behavior (2026-06-10)
+
+This section records behavior realized during the optimization pass. It refines
+sections 14–16 with concrete, shipped semantics.
+
+### 18.1 Presigned direct-to-storage uploads
+
+Clients never stream upload bytes through the API. The flow is:
+
+1. `POST /v1/uploads` with `{ media_kind, file_name?, content_type?,
+   declared_size_bytes?, source_expires_in_seconds?, processing? }` opens a
+   session and returns a presigned PUT URL plus an `upload_id`.
+2. The client PUTs the file directly to object storage.
+3. `POST /v1/uploads/{id}/complete` HEADs the staged object (confirming it
+   exists and rechecking size against the limit) and queues finalization.
+4. A worker downloads the staged object once (streaming, bounded memory),
+   computes its SHA-256 to derive the content-addressed `resource_id`,
+   server-side-copies it to the content-addressed key, writes the manifest,
+   deletes the staging object, schedules processing (always for video, on
+   request for image), and applies any source TTL.
+5. `GET /v1/uploads/{id}` is polled until `state == completed`, exposing the
+   finalized `resource_id` and `processing_task_id`.
+
+Because the server computes the hash, an untrusted client cannot poison the
+content-addressed namespace. The legacy multipart endpoints
+(`/v1/images/upload`, `/v1/videos/upload`) were removed.
+
+The filesystem storage backend does not support presigning; presigned uploads
+require an S3-compatible backend.
+
+### 18.2 Authentication (optional, JWT HS256)
+
+`MEDIAFORGE_AUTH_ENABLED` (default false) gates a middleware that requires a
+valid `Authorization: Bearer <jwt>` on every endpoint except `/health`. Tokens
+are HS256, signed with `MEDIAFORGE_JWT_SECRET`; the verifier accepts only
+`HS256` (rejecting `none` and others), compares signatures in constant time, and
+validates `exp`/`nbf` with configurable leeway. The server refuses to start when
+auth is enabled without a secret.
+
+### 18.3 Upload size limit (optional, default on)
+
+`MEDIAFORGE_UPLOAD_LIMIT_ENABLED` (default true, `MEDIAFORGE_MAX_UPLOAD_BYTES`
+default 5 GiB) rejects oversized uploads at presign time (declared size) and at
+completion (actual object size). Set the toggle false to disable.
+
+### 18.4 Source-file expiration
+
+An upload may set `source_expires_in_seconds`. The worker writes a time-ordered
+expiry marker and a background reaper deletes the original source object once due
+(derivatives are retained). Controlled by `MEDIAFORGE_SOURCE_REAPER_ENABLED`.
+
+### 18.5 Task reliability
+
+Completed and terminally failed tasks are removed from the pending queue.
+Failures retry up to `MEDIAFORGE_TASK_MAX_ATTEMPTS` (requeued to pending,
+lease released). Tasks abandoned by a crashed worker are reclaimed once their
+lease exceeds `MEDIAFORGE_TASK_LEASE_TIMEOUT_SECONDS`. Workers process up to
+`MEDIAFORGE_WORKER_CONCURRENCY` tasks concurrently. Manifest updates use
+optimistic concurrency (conditional writes with bounded retry) so concurrent
+derived/task-history updates never clobber each other.

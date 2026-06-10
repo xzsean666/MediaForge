@@ -1,5 +1,5 @@
 [package]
-name = "mediaforge-ingest"
+name = "mediaforge-uploads"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes.workspace = true
+chrono.workspace = true
 mediaforge-core = { path = "../mediaforge-core" }
+mediaforge-storage = { path = "../mediaforge-storage" }
 mediaforge-types = { path = "../mediaforge-types" }
-mime_guess.workspace = true
-sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
+tokio.workspace = true

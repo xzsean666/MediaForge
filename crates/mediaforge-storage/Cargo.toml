@@ -13,7 +13,9 @@ aws-credential-types.workspace = true
 aws-sdk-s3.workspace = true
 aws-types.workspace = true
 bytes.workspace = true
+hex.workspace = true
 mediaforge-config = { path = "../mediaforge-config" }
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

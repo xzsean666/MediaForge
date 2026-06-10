@@ -44,12 +44,60 @@ pub struct StoredObjectMetadata {
 pub trait ObjectStorage: Send + Sync {
     async fn put_object(&self, request: PutObjectRequest) -> StorageResult<()>;
     async fn put_object_if_absent(&self, request: PutObjectRequest) -> StorageResult<bool>;
+
+    /// Writes the contents of a local file without buffering the whole file in
+    /// memory (S3 streams it via a file-backed body). Used for media bytes.
+    async fn put_object_streaming(
+        &self,
+        key: &str,
+        file_path: &Path,
+        content_type: Option<String>,
+    ) -> StorageResult<()>;
+
+    /// Conditional write for optimistic concurrency. When `expected_version` is
+    /// `Some`, the write only succeeds if the object's current version matches;
+    /// when `None`, it only succeeds if the object is absent. Returns `false`
+    /// on a precondition (version) conflict instead of erroring.
+    async fn put_object_if_match(
+        &self,
+        request: PutObjectRequest,
+        expected_version: Option<String>,
+    ) -> StorageResult<bool>;
+
     async fn get_object(&self, key: &str) -> StorageResult<Bytes>;
+
+    /// Streams an object to a local file without buffering it in memory.
+    /// Returns the number of bytes written. Used by the worker to download
+    /// large media (e.g. videos) for hashing and processing.
+    async fn get_object_to_file(&self, key: &str, file_path: &Path) -> StorageResult<u64>;
+
+    /// Like [`get_object`](Self::get_object) but also returns an opaque version
+    /// token (S3 ETag / filesystem content hash) for use with
+    /// [`put_object_if_match`](Self::put_object_if_match).
+    async fn get_object_with_version(
+        &self,
+        key: &str,
+    ) -> StorageResult<(Bytes, Option<String>)>;
+
+    /// Server-side copy from one key to another (S3 CopyObject). Used to move a
+    /// finalized upload from its staging key to its content-addressed key
+    /// without round-tripping the bytes through the worker.
+    async fn copy_object(&self, source_key: &str, destination_key: &str) -> StorageResult<()>;
+
     async fn object_metadata(&self, key: &str) -> StorageResult<StoredObjectMetadata>;
     async fn object_exists(&self, key: &str) -> StorageResult<bool>;
     async fn delete_object(&self, key: &str) -> StorageResult<()>;
     async fn list_keys(&self, prefix: &str) -> StorageResult<Vec<String>>;
     async fn presign_get_url(&self, key: &str, expires_in: Duration) -> StorageResult<String>;
+
+    /// Presigned PUT URL letting a client upload bytes directly to the backend
+    /// without proxying through the API.
+    async fn presign_put_url(
+        &self,
+        key: &str,
+        expires_in: Duration,
+        content_type: Option<&str>,
+    ) -> StorageResult<String>;
 }
 
 pub async fn create_object_storage(config: &AppConfig) -> StorageResult<DynObjectStorage> {
@@ -66,16 +114,32 @@ pub async fn create_object_storage(config: &AppConfig) -> StorageResult<DynObjec
 #[derive(Debug, Clone)]
 pub struct FilesystemObjectStorage {
     root: PathBuf,
+    // Serializes conditional writes so the read-current-version / write pair in
+    // `put_object_if_match` is atomic. The filesystem backend is single-process
+    // (development only, per Agent.md); production uses S3 conditional writes.
+    cas_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FilesystemObjectStorage {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            cas_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     fn path_for_key(&self, key: &str) -> StorageResult<PathBuf> {
         validate_object_key(key)?;
         Ok(self.root.join(key))
+    }
+
+    async fn current_version(&self, key: &str) -> StorageResult<Option<String>> {
+        let path = self.path_for_key(key)?;
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(content_version(&bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
     }
 }
 
@@ -119,6 +183,20 @@ impl ObjectStorage for FilesystemObjectStorage {
         let path = self.path_for_key(key)?;
         match tokio::fs::read(path).await {
             Ok(bytes) => Ok(Bytes::from(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn get_object_to_file(&self, key: &str, file_path: &Path) -> StorageResult<u64> {
+        let source = self.path_for_key(key)?;
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        match tokio::fs::copy(&source, file_path).await {
+            Ok(bytes) => Ok(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(key.to_string()))
             }
@@ -187,9 +265,77 @@ impl ObjectStorage for FilesystemObjectStorage {
         Ok(keys)
     }
 
-    async fn presign_get_url(&self, key: &str, _expires_in: Duration) -> StorageResult<String> {
+    async fn put_object_streaming(
+        &self,
+        key: &str,
+        file_path: &Path,
+        _content_type: Option<String>,
+    ) -> StorageResult<()> {
         let path = self.path_for_key(key)?;
-        Ok(format!("file://{}", path.display()))
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::copy(file_path, &path).await?;
+        Ok(())
+    }
+
+    async fn put_object_if_match(
+        &self,
+        request: PutObjectRequest,
+        expected_version: Option<String>,
+    ) -> StorageResult<bool> {
+        let _guard = self.cas_lock.lock().await;
+        let current = self.current_version(&request.key).await?;
+        if current != expected_version {
+            return Ok(false);
+        }
+        self.put_object(request).await?;
+        Ok(true)
+    }
+
+    async fn get_object_with_version(
+        &self,
+        key: &str,
+    ) -> StorageResult<(Bytes, Option<String>)> {
+        let bytes = self.get_object(key).await?;
+        let version = content_version(&bytes);
+        Ok((bytes, Some(version)))
+    }
+
+    async fn copy_object(&self, source_key: &str, destination_key: &str) -> StorageResult<()> {
+        let source_path = self.path_for_key(source_key)?;
+        let destination_path = self.path_for_key(destination_key)?;
+        if let Some(parent) = destination_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        match tokio::fs::copy(&source_path, &destination_path).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(source_key.to_string()))
+            }
+            Err(error) => Err(StorageError::Filesystem(error)),
+        }
+    }
+
+    async fn presign_get_url(&self, key: &str, _expires_in: Duration) -> StorageResult<String> {
+        // The filesystem backend has no presigning; returning a local `file://`
+        // path would leak server paths. Filesystem deployments use HMAC links.
+        validate_object_key(key)?;
+        Err(StorageError::Presign(
+            "filesystem backend does not support presigned URLs; use the S3 backend".to_string(),
+        ))
+    }
+
+    async fn presign_put_url(
+        &self,
+        key: &str,
+        _expires_in: Duration,
+        _content_type: Option<&str>,
+    ) -> StorageResult<String> {
+        validate_object_key(key)?;
+        Err(StorageError::Presign(
+            "filesystem backend does not support presigned uploads; use the S3 backend".to_string(),
+        ))
     }
 }
 
@@ -251,7 +397,7 @@ impl ObjectStorage for S3ObjectStorage {
             .key(&request.key)
             .set_content_type(request.content_type)
             .set_metadata(Some(metadata))
-            .body(ByteStream::from(request.bytes.to_vec()))
+            .body(ByteStream::from(request.bytes))
             .send()
             .await
             .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?;
@@ -324,6 +470,44 @@ impl ObjectStorage for S3ObjectStorage {
             .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?
             .into_bytes();
         Ok(bytes)
+    }
+
+    async fn get_object_to_file(&self, key: &str, file_path: &Path) -> StorageResult<u64> {
+        use tokio::io::AsyncWriteExt;
+
+        validate_object_key(key)?;
+        let mut output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::S3(description)
+                }
+            })?;
+
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut file = tokio::fs::File::create(file_path).await?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = output
+            .body
+            .try_next()
+            .await
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?
+        {
+            file.write_all(&chunk).await?;
+            total += chunk.len() as u64;
+        }
+        file.flush().await?;
+        Ok(total)
     }
 
     async fn object_metadata(&self, key: &str) -> StorageResult<StoredObjectMetadata> {
@@ -417,6 +601,143 @@ impl ObjectStorage for S3ObjectStorage {
         Ok(keys)
     }
 
+    async fn put_object_streaming(
+        &self,
+        key: &str,
+        file_path: &Path,
+        content_type: Option<String>,
+    ) -> StorageResult<()> {
+        use aws_sdk_s3::primitives::ByteStream;
+
+        validate_object_key(key)?;
+        let body = ByteStream::from_path(file_path)
+            .await
+            .map_err(|error| StorageError::S3(error.to_string()))?;
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .set_content_type(content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?;
+        Ok(())
+    }
+
+    async fn put_object_if_match(
+        &self,
+        request: PutObjectRequest,
+        expected_version: Option<String>,
+    ) -> StorageResult<bool> {
+        use aws_sdk_s3::primitives::ByteStream;
+        use std::collections::HashMap;
+
+        validate_object_key(&request.key)?;
+        // Keep a copy for the fallback path on backends without conditional writes.
+        let fallback_request = request.clone();
+        let metadata: HashMap<String, String> = request.metadata.into_iter().collect();
+        let mut builder = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&request.key)
+            .set_content_type(request.content_type)
+            .set_metadata(Some(metadata))
+            .body(ByteStream::from(request.bytes));
+
+        match expected_version.clone() {
+            Some(version) => builder = builder.if_match(version),
+            None => builder = builder.if_none_match("*"),
+        }
+
+        match builder.send().await {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                let description = describe_sdk_error(&error);
+                if looks_like_precondition_failure(&description) {
+                    Ok(false)
+                } else if looks_like_not_implemented(&description) {
+                    // Some S3-compatible backends (e.g. Backblaze B2) do not
+                    // implement conditional writes such as If-Match. Degrade
+                    // gracefully: creates become existence-checked writes,
+                    // updates become last-writer-wins (the pre-CAS behavior).
+                    match expected_version {
+                        None => {
+                            if self.object_exists(&fallback_request.key).await? {
+                                Ok(false)
+                            } else {
+                                self.put_object(fallback_request).await?;
+                                Ok(true)
+                            }
+                        }
+                        Some(_) => {
+                            self.put_object(fallback_request).await?;
+                            Ok(true)
+                        }
+                    }
+                } else {
+                    Err(StorageError::S3(description))
+                }
+            }
+        }
+    }
+
+    async fn get_object_with_version(
+        &self,
+        key: &str,
+    ) -> StorageResult<(Bytes, Option<String>)> {
+        validate_object_key(key)?;
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::S3(description)
+                }
+            })?;
+
+        let version = output.e_tag().map(ToString::to_string);
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .map_err(|error| StorageError::S3(describe_sdk_error(&error)))?
+            .into_bytes();
+        Ok((bytes, version))
+    }
+
+    async fn copy_object(&self, source_key: &str, destination_key: &str) -> StorageResult<()> {
+        validate_object_key(source_key)?;
+        validate_object_key(destination_key)?;
+        let copy_source = format!("{}/{}", self.bucket, encode_copy_source(source_key));
+
+        self.client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(destination_key)
+            .copy_source(copy_source)
+            .send()
+            .await
+            .map_err(|error| {
+                let description = describe_sdk_error(&error);
+                if looks_like_not_found(&description) {
+                    StorageError::NotFound(source_key.to_string())
+                } else {
+                    StorageError::S3(description)
+                }
+            })?;
+        Ok(())
+    }
+
     async fn presign_get_url(&self, key: &str, expires_in: Duration) -> StorageResult<String> {
         use aws_sdk_s3::presigning::PresigningConfig;
 
@@ -428,6 +749,30 @@ impl ObjectStorage for S3ObjectStorage {
             .get_object()
             .bucket(&self.bucket)
             .key(key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|error| StorageError::Presign(describe_sdk_error(&error)))?;
+
+        Ok(presigned_request.uri().to_string())
+    }
+
+    async fn presign_put_url(
+        &self,
+        key: &str,
+        expires_in: Duration,
+        content_type: Option<&str>,
+    ) -> StorageResult<String> {
+        use aws_sdk_s3::presigning::PresigningConfig;
+
+        validate_object_key(key)?;
+        let presigning_config = PresigningConfig::expires_in(expires_in)
+            .map_err(|error| StorageError::Presign(describe_sdk_error(&error)))?;
+        let presigned_request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .set_content_type(content_type.map(ToString::to_string))
             .presigned(presigning_config)
             .await
             .map_err(|error| StorageError::Presign(describe_sdk_error(&error)))?;
@@ -452,6 +797,29 @@ fn path_to_key(root: &Path, path: &Path) -> StorageResult<String> {
         .strip_prefix(root)
         .map_err(|_| StorageError::InvalidObjectKey(path.display().to_string()))?;
     Ok(relative_path.to_string_lossy().replace('\\', "/"))
+}
+
+/// Opaque version token for the filesystem backend: the SHA-256 of the current
+/// contents. Stable and cheap to compare for the development CAS path.
+fn content_version(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Percent-encodes an S3 copy-source key, leaving path separators intact.
+fn encode_copy_source(key: &str) -> String {
+    let mut encoded = String::with_capacity(key.len());
+    for byte in key.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn looks_like_not_found(error: &str) -> bool {
@@ -536,6 +904,93 @@ mod tests {
                 "tasks/pending/nested/b.json".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_cas_rejects_stale_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+        let make = |body: &'static [u8]| PutObjectRequest {
+            key: "manifest.json".to_string(),
+            bytes: Bytes::from_static(body),
+            content_type: None,
+            metadata: BTreeMap::new(),
+        };
+
+        // Create: expected_version None succeeds only when absent.
+        assert!(storage.put_object_if_match(make(b"v1"), None).await.unwrap());
+        assert!(!storage.put_object_if_match(make(b"v2"), None).await.unwrap());
+
+        let (_, version) = storage
+            .get_object_with_version("manifest.json")
+            .await
+            .unwrap();
+        // Matching version succeeds; stale version is rejected.
+        assert!(storage
+            .put_object_if_match(make(b"v3"), version.clone())
+            .await
+            .unwrap());
+        assert!(!storage
+            .put_object_if_match(make(b"v4"), version)
+            .await
+            .unwrap());
+        assert_eq!(
+            storage.get_object("manifest.json").await.unwrap(),
+            Bytes::from_static(b"v3")
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_copy_object_duplicates_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+        storage
+            .put_object(PutObjectRequest {
+                key: "uploads/staging/abc/source".to_string(),
+                bytes: Bytes::from_static(b"payload"),
+                content_type: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+
+        storage
+            .copy_object("uploads/staging/abc/source", "media/final/source.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_object("media/final/source.bin").await.unwrap(),
+            Bytes::from_static(b"payload")
+        );
+
+        let missing = storage
+            .copy_object("uploads/staging/missing", "media/x")
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, StorageError::NotFound(_)));
+    }
+
+    #[test]
+    fn encode_copy_source_preserves_slashes() {
+        assert_eq!(
+            encode_copy_source("uploads/staging/id/source"),
+            "uploads/staging/id/source"
+        );
+        assert_eq!(
+            encode_copy_source("media/sha256:abc/source"),
+            "media/sha256%3Aabc/source"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_presign_is_unsupported() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = FilesystemObjectStorage::new(directory.path().to_path_buf());
+        let error = storage
+            .presign_put_url("media/x", Duration::from_secs(60), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StorageError::Presign(_)));
     }
 
     #[tokio::test]

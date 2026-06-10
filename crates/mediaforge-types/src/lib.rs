@@ -303,6 +303,10 @@ pub struct TaskStatus {
     pub resource_id: ResourceId,
     pub state: TaskState,
     pub message: Option<String>,
+    /// Number of processing attempts so far. Incremented on each failure and
+    /// used to bound retries before the task is marked permanently failed.
+    #[serde(default)]
+    pub attempts: u32,
     pub updated_at: DateTime<Utc>,
 }
 

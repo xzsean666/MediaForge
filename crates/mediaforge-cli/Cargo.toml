@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 mediaforge-api = { path = "../mediaforge-api" }
+mediaforge-auth = { path = "../mediaforge-auth" }
 mediaforge-config = { path = "../mediaforge-config" }
 mediaforge-observability = { path = "../mediaforge-observability" }
 mediaforge-types = { path = "../mediaforge-types" }

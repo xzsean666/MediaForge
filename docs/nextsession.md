@@ -252,3 +252,52 @@ Do not:
 - Skip manifest design.
 - Hide storage keys or link behavior inside unrelated modules.
 - Treat SQLite as required for correctness.
+
+## 10. Optimization Pass Changes (2026-06-10)
+
+This session implemented a security/reliability/performance pass plus three
+features. All crates compile, `cargo clippy --workspace --all-targets` is clean,
+and `cargo test --workspace` passes (39 unit/integration tests).
+
+New crates:
+
+- `mediaforge-auth` — HS256 JWT verification (hand-rolled on hmac/sha2/base64;
+  only HS256 accepted, `none` rejected, constant-time signature compare) and an
+  Axum `require_auth` middleware. Off by default (`MEDIAFORGE_AUTH_ENABLED`).
+- `mediaforge-uploads` — `UploadSession` + `UploadSessionRepository` (object-
+  storage-backed session lifecycle and finalization queue).
+
+Upload architecture replaced: clients now upload directly to S3 via presigned
+PUT URLs; the worker finalizes (download→hash→content-address→manifest). The
+legacy `/v1/images/upload` and `/v1/videos/upload` multipart endpoints were
+removed. New endpoints: `POST /v1/uploads`, `POST /v1/uploads/{id}/complete`,
+`GET /v1/uploads/{id}`, `DELETE /v1/uploads/{id}`. See SPEC §18 and the
+ARCHITECTURE implementation-update section.
+
+Audit fixes shipped: task queue cleanup on terminal states; lease-timeout
+reclaim + bounded retry; manifest optimistic-concurrency (CAS) to stop lost
+updates; streaming uploads/downloads (no whole-file buffering); upload size
+limit (toggle, default on); JWT auth (toggle, default off); `required_when_s3`
+now errors instead of silently defaulting the bucket; default-signing-secret
+startup warning; constant-time link-signature compare; content sniffing via
+`infer` at finalize; source-file TTL + reaper; true worker concurrency;
+`canonical_json` now genuinely canonical; dead code removed.
+
+New env vars (see `.env.example`): `MEDIAFORGE_AUTH_ENABLED`,
+`MEDIAFORGE_AUTH_LEEWAY_SECONDS`, `MEDIAFORGE_UPLOAD_LIMIT_ENABLED`,
+`MEDIAFORGE_MAX_UPLOAD_BYTES`, `MEDIAFORGE_PRESIGNED_UPLOAD_EXPIRY_SECONDS`,
+`MEDIAFORGE_TASK_LEASE_TIMEOUT_SECONDS`, `MEDIAFORGE_TASK_MAX_ATTEMPTS`,
+`MEDIAFORGE_SOURCE_REAPER_ENABLED`.
+
+CLI: added `mediaforge mint-token` (mint an HS256 JWT for testing auth).
+
+Pending / not done:
+
+- E2E (`scripts/e2e-b2.sh`) rewritten for the presigned flow but not executed
+  here (needs live B2 credentials); syntax-checked only.
+- Filesystem backend cannot presign, so presigned uploads require S3; a local
+  dev direct-upload fallback was intentionally deferred.
+- Image watermark / text watermark operations remain unimplemented (worker
+  still returns the existing "not enabled yet" errors).
+- `.env.test` holds a real Backblaze B2 key in the working tree (gitignored,
+  not committed) — rotate it.
