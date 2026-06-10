@@ -1,0 +1,21 @@
+[package]
+name = "mediaforge-ingest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+mediaforge-core = { path = "../mediaforge-core" }
+mediaforge-types = { path = "../mediaforge-types" }
+mime_guess.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

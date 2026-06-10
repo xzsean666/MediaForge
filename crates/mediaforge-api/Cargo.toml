@@ -1,0 +1,27 @@
+[package]
+name = "mediaforge-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+mediaforge-config = { path = "../mediaforge-config" }
+mediaforge-core = { path = "../mediaforge-core" }
+mediaforge-image = { path = "../mediaforge-image" }
+mediaforge-ingest = { path = "../mediaforge-ingest" }
+mediaforge-links = { path = "../mediaforge-links" }
+mediaforge-manifest = { path = "../mediaforge-manifest" }
+mediaforge-storage = { path = "../mediaforge-storage" }
+mediaforge-tasks = { path = "../mediaforge-tasks" }
+mediaforge-types = { path = "../mediaforge-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+

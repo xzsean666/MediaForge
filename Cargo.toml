@@ -7,6 +7,13 @@ members = [
     "crates/mediaforge-manifest",
     "crates/mediaforge-tasks",
     "crates/mediaforge-links",
+    "crates/mediaforge-ingest",
+    "crates/mediaforge-image",
+    "crates/mediaforge-video",
+    "crates/mediaforge-observability",
+    "crates/mediaforge-api",
+    "crates/mediaforge-worker",
+    "crates/mediaforge-cli",
 ]
 resolver = "2"
 

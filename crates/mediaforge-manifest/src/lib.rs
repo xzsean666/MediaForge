@@ -91,9 +91,11 @@ impl ManifestRepository {
         derived_object: DerivedMediaObject,
     ) -> ManifestResult<ResourceManifest> {
         let mut manifest = self.read(resource_id).await?;
-        manifest
-            .derived
-            .retain(|existing| existing.result_id != derived_object.result_id);
+        manifest.derived.retain(|existing| {
+            !(existing.result_id == derived_object.result_id
+                && existing.derived_kind == derived_object.derived_kind
+                && existing.object.object_key == derived_object.object.object_key)
+        });
         manifest.derived.push(derived_object);
         manifest.updated_at = Utc::now();
         self.write(&manifest).await?;

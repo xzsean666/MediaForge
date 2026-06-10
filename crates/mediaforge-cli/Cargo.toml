@@ -1,0 +1,20 @@
+[package]
+name = "mediaforge-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mediaforge"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+mediaforge-api = { path = "../mediaforge-api" }
+mediaforge-config = { path = "../mediaforge-config" }
+mediaforge-observability = { path = "../mediaforge-observability" }
+mediaforge-worker = { path = "../mediaforge-worker" }
+tokio.workspace = true
+
