@@ -635,6 +635,8 @@ impl ObjectStorage for S3ObjectStorage {
         use std::collections::HashMap;
 
         validate_object_key(&request.key)?;
+        // Keep a copy for the fallback path on backends without conditional writes.
+        let fallback_request = request.clone();
         let metadata: HashMap<String, String> = request.metadata.into_iter().collect();
         let mut builder = self
             .client
@@ -645,7 +647,7 @@ impl ObjectStorage for S3ObjectStorage {
             .set_metadata(Some(metadata))
             .body(ByteStream::from(request.bytes));
 
-        match expected_version {
+        match expected_version.clone() {
             Some(version) => builder = builder.if_match(version),
             None => builder = builder.if_none_match("*"),
         }
@@ -656,6 +658,25 @@ impl ObjectStorage for S3ObjectStorage {
                 let description = describe_sdk_error(&error);
                 if looks_like_precondition_failure(&description) {
                     Ok(false)
+                } else if looks_like_not_implemented(&description) {
+                    // Some S3-compatible backends (e.g. Backblaze B2) do not
+                    // implement conditional writes such as If-Match. Degrade
+                    // gracefully: creates become existence-checked writes,
+                    // updates become last-writer-wins (the pre-CAS behavior).
+                    match expected_version {
+                        None => {
+                            if self.object_exists(&fallback_request.key).await? {
+                                Ok(false)
+                            } else {
+                                self.put_object(fallback_request).await?;
+                                Ok(true)
+                            }
+                        }
+                        Some(_) => {
+                            self.put_object(fallback_request).await?;
+                            Ok(true)
+                        }
+                    }
                 } else {
                     Err(StorageError::S3(description))
                 }

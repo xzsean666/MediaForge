@@ -170,33 +170,54 @@ For S3-compatible local development:
 Current API routes:
 
 ```text
-GET  /health
-POST /v1/images/upload
-POST /v1/videos/upload
-GET  /v1/resources/{resource_id}
-POST /v1/resources/{resource_id}/image
-POST /v1/resources/{resource_id}/video
-POST /v1/resources/{resource_id}/links
-GET  /v1/tasks/{task_id}
+GET    /health
+POST   /v1/uploads                       # open a presigned direct-to-S3 upload
+POST   /v1/uploads/{upload_id}/complete  # confirm upload, queue finalization
+GET    /v1/uploads/{upload_id}           # poll for finalized resource_id
+DELETE /v1/uploads/{upload_id}           # cancel an upload
+GET    /v1/resources/{resource_id}
+POST   /v1/resources/{resource_id}/image
+POST   /v1/resources/{resource_id}/video
+POST   /v1/resources/{resource_id}/links
+GET    /v1/tasks/{task_id}
 ```
 
-## 7. Backblaze B2 E2E Test
+Uploads go directly to object storage via a presigned PUT URL; the API never
+streams upload bytes. See SPEC §18.1. When `MEDIAFORGE_AUTH_ENABLED=true`, every
+route except `/health` requires `Authorization: Bearer <HS256 JWT>`.
 
-The repository includes a real Backblaze B2/S3-compatible E2E script:
+## 7. S3-Compatible E2E Test (R2 / B2 / generic S3)
+
+The repository includes a real-environment E2E script that drives the presigned
+direct-to-storage upload flow against any S3-compatible provider:
 
 ```text
 ./scripts/e2e-b2.sh
 ```
 
-The script reads `.env.test` and expects:
+The script reads `.env.test`. Select a provider and supply S3 credentials:
 
 ```text
-B2_APPLICATION_KEY_ID=...
-B2_APPLICATION_KEY=...
-B2_BUCKET_NAME=...
+MEDIAFORGE_E2E_PROVIDER=r2            # r2 | b2 | s3
+MEDIAFORGE_S3_BUCKET=...
+MEDIAFORGE_S3_ACCESS_KEY_ID=...
+MEDIAFORGE_S3_SECRET_ACCESS_KEY=...
+MEDIAFORGE_S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com  # R2/S3; blank for B2
+MEDIAFORGE_S3_REGION=auto
+MEDIAFORGE_S3_FORCE_PATH_STYLE=true
 ```
 
-It uses the Backblaze B2 Native API only to discover the S3 API URL, then runs MediaForge through the S3-compatible storage backend.
+- `r2` / `s3`: set `MEDIAFORGE_S3_ENDPOINT` explicitly (R2 uses
+  `https://<accountid>.r2.cloudflarestorage.com`, `REGION=auto`).
+- `b2`: leave the endpoint blank — the script calls the Backblaze B2 authorize
+  API once to discover the S3 endpoint and region, then runs entirely through
+  the S3-compatible backend.
+
+The script runs `mediaforge combined`, performs a presigned image and video
+upload, waits for worker finalization and processing, and verifies the
+resulting manifests. Set `MEDIAFORGE_E2E_AUTH=1` to also verify JWT auth gating
+(a separate auth-enabled server, minting a token with `mediaforge mint-token`).
+See `.env.test` for a Cloudflare R2 example block.
 
 CPU and compile limits are enabled by default:
 

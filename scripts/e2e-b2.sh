@@ -42,9 +42,11 @@ require_command curl
 require_command ffmpeg
 require_command jq
 
-require_env B2_APPLICATION_KEY_ID
-require_env B2_APPLICATION_KEY
-require_env B2_BUCKET_NAME
+# Provider controls only how the S3 endpoint/region are resolved below.
+PROVIDER="${MEDIAFORGE_E2E_PROVIDER:-s3}"
+require_env MEDIAFORGE_S3_BUCKET
+require_env MEDIAFORGE_S3_ACCESS_KEY_ID
+require_env MEDIAFORGE_S3_SECRET_ACCESS_KEY
 
 WORK_DIR="$(mktemp -d /tmp/mediaforge-b2-e2e.XXXXXX)"
 API_PORT="${MEDIAFORGE_E2E_PORT:-18180}"
@@ -167,40 +169,62 @@ upload_via_presign() {
   jq -r '.resource_id' "$result_out"
 }
 
-step "authorize Backblaze B2 and derive S3 endpoint"
+step "resolve S3 endpoint and region (provider: $PROVIDER)"
+
+# Backblaze B2 exposes its S3 endpoint via an authorize call; the S3 access
+# key id / secret are the B2 applicationKeyId / applicationKey.
 authorize_b2() {
-  local response
-  response="$(curl -fsS -u "${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}" \
+  local key_id="$1" app_key="$2" response
+  response="$(curl -fsS -u "${key_id}:${app_key}" \
     "https://api.backblazeb2.com/b2api/v4/b2_authorize_account" || true)"
   if [[ -z "$response" ]] || ! jq -e '.apiInfo.storageApi.s3ApiUrl' >/dev/null 2>&1 <<<"$response"; then
-    response="$(curl -fsS -u "${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}" \
+    response="$(curl -fsS -u "${key_id}:${app_key}" \
       "https://api.backblazeb2.com/b2api/v3/b2_authorize_account")"
   fi
   printf '%s' "$response"
 }
-AUTH_JSON="$(authorize_b2)"
-S3_ENDPOINT="$(jq -r '.apiInfo.storageApi.s3ApiUrl' <<<"$AUTH_JSON")"
-if [[ "$S3_ENDPOINT" == "null" || -z "$S3_ENDPOINT" ]]; then
-  echo "Backblaze authorization did not return apiInfo.storageApi.s3ApiUrl" >&2
+
+S3_ENDPOINT="${MEDIAFORGE_S3_ENDPOINT:-}"
+S3_REGION="${MEDIAFORGE_S3_REGION:-auto}"
+
+if [[ "$PROVIDER" == "b2" && -z "$S3_ENDPOINT" ]]; then
+  AUTH_JSON="$(authorize_b2 "$MEDIAFORGE_S3_ACCESS_KEY_ID" "$MEDIAFORGE_S3_SECRET_ACCESS_KEY")"
+  S3_ENDPOINT="$(jq -r '.apiInfo.storageApi.s3ApiUrl' <<<"$AUTH_JSON")"
+  if [[ "$S3_ENDPOINT" == "null" || -z "$S3_ENDPOINT" ]]; then
+    echo "Backblaze authorization did not return apiInfo.storageApi.s3ApiUrl" >&2
+    exit 1
+  fi
+fi
+
+if [[ -z "$S3_ENDPOINT" ]]; then
+  echo "MEDIAFORGE_S3_ENDPOINT must be set for provider '$PROVIDER' (only 'b2' auto-derives it)" >&2
   exit 1
 fi
 
 S3_HOST="${S3_ENDPOINT#https://}"
 S3_HOST="${S3_HOST#http://}"
-S3_REGION="$(awk -F. '{print $2}' <<<"$S3_HOST")"
-if [[ -z "$S3_REGION" || "$S3_REGION" == "$S3_HOST" ]]; then
-  echo "could not derive S3 region from endpoint host" >&2
-  exit 1
+
+# B2 requires the region embedded in its endpoint host (e.g. s3.us-west-004...);
+# R2 and most others use "auto" or an explicit region.
+if [[ "$PROVIDER" == "b2" && ( -z "$S3_REGION" || "$S3_REGION" == "auto" ) ]]; then
+  S3_REGION="$(awk -F. '{print $2}' <<<"$S3_HOST")"
+  if [[ -z "$S3_REGION" || "$S3_REGION" == "$S3_HOST" ]]; then
+    echo "could not derive S3 region from endpoint host" >&2
+    exit 1
+  fi
 fi
+
+echo "    endpoint: $S3_ENDPOINT"
+echo "    region:   $S3_REGION"
 
 export MEDIAFORGE_MODE=combined
 export MEDIAFORGE_STORAGE_BACKEND=s3
 export MEDIAFORGE_S3_ENDPOINT="$S3_ENDPOINT"
 export MEDIAFORGE_S3_REGION="$S3_REGION"
-export MEDIAFORGE_S3_BUCKET="$B2_BUCKET_NAME"
-export MEDIAFORGE_S3_ACCESS_KEY_ID="$B2_APPLICATION_KEY_ID"
-export MEDIAFORGE_S3_SECRET_ACCESS_KEY="$B2_APPLICATION_KEY"
-export MEDIAFORGE_S3_FORCE_PATH_STYLE=true
+export MEDIAFORGE_S3_BUCKET="$MEDIAFORGE_S3_BUCKET"
+export MEDIAFORGE_S3_ACCESS_KEY_ID="$MEDIAFORGE_S3_ACCESS_KEY_ID"
+export MEDIAFORGE_S3_SECRET_ACCESS_KEY="$MEDIAFORGE_S3_SECRET_ACCESS_KEY"
+export MEDIAFORGE_S3_FORCE_PATH_STYLE="${MEDIAFORGE_S3_FORCE_PATH_STYLE:-true}"
 export MEDIAFORGE_HTTP_BIND="127.0.0.1:${API_PORT}"
 export MEDIAFORGE_TEMP_DIR="$WORK_DIR/temp"
 export MEDIAFORGE_CDN_BASE_URL="${MEDIAFORGE_CDN_BASE_URL:-https://cdn.example.invalid}"
@@ -349,10 +373,11 @@ jq -n \
   --arg image_task_id "$IMAGE_TASK_ID" \
   --arg video_resource_id "$VIDEO_RESOURCE_ID" \
   --arg video_task_id "$VIDEO_TASK_ID" \
+  --arg provider "$PROVIDER" \
   --arg endpoint_host "$S3_HOST" \
   '{
     status: "ok",
-    storage: "backblaze_b2_s3",
+    provider: $provider,
     upload_flow: "presigned_direct_to_storage",
     endpoint_host: $endpoint_host,
     image_resource_id: $image_resource_id,
