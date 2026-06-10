@@ -852,3 +852,51 @@ Current external documentation links are stored separately in `docs/EXTERNAL_DOC
 4. Strict prevention of duplicate video processing may require a provider that supports reliable conditional object creation or a future optional queue backend.
 5. HLS segment naming and cache headers need careful CDN compatibility testing.
 6. AVIF and H265 support may depend on system libraries and FFmpeg licensing/build options.
+
+## Implementation Update — Upload, Auth, Reliability (2026-06-10)
+
+The realized system differs from the original MVP sketch in the areas below.
+New crates: `mediaforge-auth` (HS256 JWT verification + Axum middleware) and
+`mediaforge-uploads` (upload-session lifecycle and finalization queue).
+
+### Upload data flow (presigned, server-side hashing)
+
+```text
+client ──POST /v1/uploads──▶ API ──(presigned PUT URL, upload_id)──▶ client
+client ──PUT bytes────────▶ object storage (staging key)            [API not in path]
+client ──POST .../complete▶ API ──HEAD staging, enqueue finalize──▶ uploads/pending/
+worker ──finalize────────▶ download staging (stream+hash) → resource_id
+                            → server-side copy to content-addressed key
+                            → write manifest → delete staging
+                            → schedule processing task → mark session completed
+client ──GET /v1/uploads/{id}──▶ resource_id + processing_task_id
+```
+
+Rationale: bytes never traverse the API, so large videos are unaffected by API
+memory/limits; the worker computes the SHA-256 during the download it must do
+anyway, so an untrusted client cannot poison the content-addressed namespace and
+nothing is downloaded twice. Object keys: `uploads/sessions/{id}.json`,
+`uploads/pending/{id}.json`, `uploads/staging/{id}/source`.
+
+### Source expiry
+
+Per-object TTL is app-level (S3 lifecycle is not portable across providers).
+Markers live at `sources/expiring/{unix:020}/{resource}.json`; the zero-padded
+timestamp makes the listing time-ordered so the worker reaper stops at the first
+not-yet-due marker.
+
+### Concurrency and durability
+
+- Manifest mutations use optimistic concurrency: `get_object_with_version` +
+  `put_object_if_match` (S3 ETag `If-Match`/`If-None-Match`; filesystem uses a
+  content hash plus an in-process lock, dev-only) with bounded retry.
+- Task lifecycle: leases expire and are reclaimed; failures retry up to a cap;
+  completed/failed tasks are dequeued so listing stays cheap.
+- Storage gained streaming `put_object_streaming` / `get_object_to_file` and a
+  server-side `copy_object`, so neither the API nor the worker buffers whole
+  media files in memory.
+
+### Authentication
+
+Optional HS256 JWT, off by default, enforced by middleware on all routes except
+`/health`. See SPEC §18.2.

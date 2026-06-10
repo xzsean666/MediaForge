@@ -3,7 +3,9 @@ members = [
     "crates/mediaforge-types",
     "crates/mediaforge-core",
     "crates/mediaforge-config",
+    "crates/mediaforge-auth",
     "crates/mediaforge-storage",
+    "crates/mediaforge-uploads",
     "crates/mediaforge-manifest",
     "crates/mediaforge-tasks",
     "crates/mediaforge-links",
@@ -38,6 +40,7 @@ futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
 image = { version = "0.25", default-features = true }
+infer = "0.16"
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

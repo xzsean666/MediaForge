@@ -29,11 +29,34 @@ pub fn resource_id_from_sha256(hash_hex: &str) -> CoreResult<ResourceId> {
     Ok(ResourceId(format!("sha256:{hash_hex}")))
 }
 
+/// Serializes a value to a canonical JSON string with object keys sorted
+/// recursively. Identity helpers ([`result_id_from_parameters`],
+/// [`task_id_from_parameters`]) rely on this being stable regardless of struct
+/// field order or any `serde_json` map-ordering feature flags.
 pub fn canonical_json<T>(value: &T) -> CoreResult<String>
 where
     T: Serialize,
 {
-    Ok(serde_json::to_string(value)?)
+    let value = serde_json::to_value(value)?;
+    let canonical = canonicalize_value(value);
+    Ok(serde_json::to_string(&canonical)?)
+}
+
+fn canonicalize_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            // BTreeMap iterates in sorted key order, giving a deterministic layout.
+            let sorted: std::collections::BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(key, nested)| (key, canonicalize_value(nested)))
+                .collect();
+            serde_json::to_value(sorted).unwrap_or(serde_json::Value::Null)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_value).collect())
+        }
+        other => other,
+    }
 }
 
 pub fn result_id_from_parameters<T>(
@@ -193,6 +216,60 @@ pub fn task_failed_key(task_id: &TaskId) -> String {
     format!("tasks/failed/{}.json", task_id.as_ref())
 }
 
+/// Object key for a presigned-upload session descriptor.
+pub fn upload_session_key(upload_id: &str) -> String {
+    format!("uploads/sessions/{upload_id}.json")
+}
+
+/// Object key marking an upload that has been handed off to S3 and is awaiting
+/// worker finalization (download, hash, content-address, manifest).
+pub fn upload_pending_key(upload_id: &str) -> String {
+    format!("uploads/pending/{upload_id}.json")
+}
+
+/// Prefix for listing the upload finalization queue.
+pub fn upload_pending_prefix() -> String {
+    "uploads/pending".to_string()
+}
+
+/// Object key the client uploads to directly via a presigned PUT URL. The bytes
+/// are not yet content-addressed because the hash is unknown until finalization.
+pub fn upload_staging_key(upload_id: &str) -> String {
+    format!("uploads/staging/{upload_id}/source")
+}
+
+pub const SOURCE_EXPIRY_PREFIX: &str = "sources/expiring";
+
+/// Object key for a source-file expiry marker. The Unix timestamp is zero-padded
+/// and placed first so lexical ordering of [`list_keys`](crate) matches time
+/// ordering, letting the reaper find due markers cheaply.
+pub fn source_expiry_key(expires_at_unix: i64, resource_id: &ResourceId) -> String {
+    let sanitized = sanitize_for_key(resource_id.as_ref());
+    format!("{SOURCE_EXPIRY_PREFIX}/{expires_at_unix:020}/{sanitized}.json")
+}
+
+pub fn source_expiry_prefix() -> String {
+    format!("{SOURCE_EXPIRY_PREFIX}/")
+}
+
+/// Parses the Unix expiry timestamp out of a key produced by [`source_expiry_key`].
+pub fn source_expiry_timestamp_from_key(key: &str) -> Option<i64> {
+    let remainder = key.strip_prefix(SOURCE_EXPIRY_PREFIX)?;
+    let remainder = remainder.trim_start_matches('/');
+    let (timestamp, _rest) = remainder.split_once('/')?;
+    timestamp.parse().ok()
+}
+
+fn sanitize_for_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
+            _ => '_',
+        })
+        .collect()
+}
+
 fn validate_sha256_hex(hash_hex: &str) -> CoreResult<()> {
     if hash_hex.len() != 64 {
         return Err(CoreError::InvalidSha256);
@@ -246,6 +323,26 @@ mod tests {
         let second = result_id_from_parameters(&resource_id, "image_processing", &request).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn canonical_json_sorts_object_keys() {
+        let value = serde_json::json!({"b": 1, "a": {"d": 4, "c": 3}});
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            r#"{"a":{"c":3,"d":4},"b":1}"#
+        );
+    }
+
+    #[test]
+    fn source_expiry_key_is_time_ordered_and_parsable() {
+        let resource_id = resource_id_from_bytes(b"expiring");
+        let earlier = source_expiry_key(100, &resource_id);
+        let later = source_expiry_key(2_000, &resource_id);
+        assert!(earlier < later, "zero-padded timestamps must sort by time");
+        assert_eq!(source_expiry_timestamp_from_key(&earlier), Some(100));
+        assert_eq!(source_expiry_timestamp_from_key(&later), Some(2_000));
+        assert!(earlier.starts_with(&source_expiry_prefix()));
     }
 
     #[test]

@@ -20,6 +20,13 @@ enum Command {
         #[arg(long, default_value = "manual-worker")]
         worker_id: String,
     },
+    /// Mint an HS256 JWT signed with MEDIAFORGE_JWT_SECRET (for testing auth).
+    MintToken {
+        #[arg(long)]
+        subject: Option<String>,
+        #[arg(long, default_value_t = 3600)]
+        ttl_seconds: i64,
+    },
 }
 
 #[tokio::main]
@@ -46,8 +53,38 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             )
             .await?
         }
+        Command::MintToken {
+            subject,
+            ttl_seconds,
+        } => mint_token(&config, subject, ttl_seconds)?,
     }
 
+    Ok(())
+}
+
+fn mint_token(
+    config: &AppConfig,
+    subject: Option<String>,
+    ttl_seconds: i64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secret = config
+        .auth
+        .jwt_secret
+        .as_deref()
+        .ok_or("MEDIAFORGE_JWT_SECRET must be set to mint a token")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let claims = mediaforge_auth::Claims {
+        sub: subject,
+        iat: Some(now),
+        exp: Some(now + ttl_seconds),
+        nbf: None,
+    };
+    println!("{}", mediaforge_auth::encode_hs256(&claims, secret));
     Ok(())
 }
 

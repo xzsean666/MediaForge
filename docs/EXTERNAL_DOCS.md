@@ -29,7 +29,11 @@ Future AI sessions must check this file before using external APIs. If a link ch
 | --- | --- | --- |
 | Serde | Rust serialization framework | https://serde.rs/ |
 | serde_json | JSON serialization and deserialization | https://docs.rs/serde_json/latest/serde_json/ |
-| Multer | Multipart upload parsing | https://docs.rs/multer/latest/multer/ |
+| infer | File-signature (magic byte) detection for upload media-kind validation | https://docs.rs/infer/latest/infer/ |
+| base64 | base64url encode/decode for JWT and HMAC link signatures | https://docs.rs/base64/latest/base64/ |
+
+Note: uploads are no longer parsed as multipart by the API. Clients upload bytes
+directly to object storage via S3 presigned PUT URLs (see "Object Storage").
 
 ## Object Storage and S3 Compatibility
 
@@ -78,8 +82,8 @@ Future AI sessions must check this file before using external APIs. If a link ch
 | --- | --- | --- |
 | sha2 crate | SHA256 Resource IDs and result IDs | https://docs.rs/sha2/latest/sha2/ |
 | md5 crate | MD5 compatibility only, not security-sensitive signing | https://docs.rs/md5/latest/md5/ |
-| jsonwebtoken crate | JWT API authentication | https://docs.rs/jsonwebtoken/latest/jsonwebtoken/ |
-| hmac crate | HMAC signed platform links | https://docs.rs/hmac/latest/hmac/ |
+| JWT (RFC 7519) | Token structure/claims for API auth; HS256 verification is hand-rolled on hmac+sha2+base64 (only HS256 accepted, `none` rejected) | https://datatracker.ietf.org/doc/html/rfc7519 |
+| hmac crate | HMAC for HS256 JWT verification and signed platform links | https://docs.rs/hmac/latest/hmac/ |
 
 Security note:
 

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true
+infer.workspace = true
 mediaforge-config = { path = "../mediaforge-config" }
 mediaforge-core = { path = "../mediaforge-core" }
 mediaforge-image = { path = "../mediaforge-image" }
@@ -17,9 +18,14 @@ mediaforge-manifest = { path = "../mediaforge-manifest" }
 mediaforge-storage = { path = "../mediaforge-storage" }
 mediaforge-tasks = { path = "../mediaforge-tasks" }
 mediaforge-types = { path = "../mediaforge-types" }
+mediaforge-uploads = { path = "../mediaforge-uploads" }
 mediaforge-video = { path = "../mediaforge-video" }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

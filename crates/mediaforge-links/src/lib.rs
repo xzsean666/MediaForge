@@ -96,7 +96,9 @@ impl LinkGenerator {
         }
 
         let expected = self.signature(object_key, expires_at_unix, permission)?;
-        Ok(expected == signature)
+        // Constant-time comparison so a forged signature cannot be recovered
+        // byte-by-byte via response timing.
+        Ok(constant_time_eq(expected.as_bytes(), signature.as_bytes()))
     }
 
     fn public_url(&self, object_key: &str) -> LinkResult<String> {
@@ -136,6 +138,17 @@ impl LinkGenerator {
     }
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
 fn join_url(base_url: &str, object_key: &str) -> String {
     format!(
         "{}/{}",
@@ -151,7 +164,10 @@ fn join_url(base_url: &str, object_key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaforge_config::{AppConfig, RuntimeMode, S3Config, StorageBackend, StorageConfig};
+    use mediaforge_config::{
+        AppConfig, AuthConfig, RuntimeMode, S3Config, StorageBackend, StorageConfig,
+        UploadLimitConfig,
+    };
     use mediaforge_storage::FilesystemObjectStorage;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -174,13 +190,25 @@ mod tests {
             },
             cdn_base_url: Some("https://cdn.example.com/media".to_string()),
             link_signing_secret: "secret".to_string(),
-            jwt_secret: None,
+            auth: AuthConfig {
+                enabled: false,
+                jwt_secret: None,
+                leeway_seconds: 30,
+            },
+            upload_limit: UploadLimitConfig {
+                enabled: true,
+                max_bytes: 1024,
+            },
             temp_directory: PathBuf::from("/tmp/mediaforge"),
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             ffmpeg_threads: Some(1),
             worker_concurrency: 1,
             worker_poll_interval: Duration::from_secs(1),
+            task_lease_timeout: Duration::from_secs(600),
+            task_max_attempts: 3,
+            presigned_upload_expiry: Duration::from_secs(3600),
+            source_reaper_enabled: true,
             sqlite_cache_path: None,
             log_level: "info".to_string(),
         }
