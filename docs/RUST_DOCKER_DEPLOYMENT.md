@@ -48,6 +48,7 @@ Compose files:
 
 ```text
 docker-compose.yml
+docker-compose.gpu.yml
 docker-compose.prebuilt.yml
 docker-compose.prebuilt.cn.yml
 ```
@@ -366,7 +367,78 @@ docker compose up -d --build mediaforge
 
 Keep low values on development machines to avoid starving the IDE.
 
-## 11. Runtime Modes In Docker
+## 11. NVIDIA GPU Acceleration
+
+MediaForge defaults to CPU FFmpeg encoders. To use NVIDIA NVENC for video
+encoding, enable both container GPU access and the application encoder switch.
+
+Host prerequisites:
+
+- NVIDIA driver installed on the Docker host.
+- NVIDIA Container Toolkit installed and configured for Docker.
+- Docker can run a GPU container successfully.
+- The runtime FFmpeg build exposes `h264_nvenc` or `hevc_nvenc`.
+
+Source-build compose with GPU 0:
+
+```bash
+MEDIAFORGE_NVIDIA_DEVICE_ID=0 \
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build mediaforge
+```
+
+Use a specific GPU UUID or index:
+
+```bash
+MEDIAFORGE_NVIDIA_DEVICE_ID=GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build mediaforge
+```
+
+The GPU overlay sets:
+
+```text
+MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION=nvidia
+NVIDIA_VISIBLE_DEVICES=${MEDIAFORGE_NVIDIA_DEVICE_ID:-0}
+NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+```
+
+`MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION` accepts:
+
+```text
+none
+cpu
+software
+nvidia
+nvenc
+```
+
+When NVIDIA acceleration is enabled:
+
+- H.264 uses `h264_nvenc`.
+- H.265 uses `hevc_nvenc`.
+- HLS video generation uses `h264_nvenc`.
+- AV1 remains CPU-only and is rejected when NVIDIA acceleration is selected.
+- `crf` maps to NVENC `cq`, so values above 51 are rejected.
+
+Verify codec availability inside the built image:
+
+```bash
+docker run --rm --gpus '"device=0"' \
+  --entrypoint ffmpeg \
+  mediaforge:local -hide_banner -encoders | grep nvenc
+```
+
+Prebuilt compose uses the same overlay:
+
+```bash
+MEDIAFORGE_NVIDIA_DEVICE_ID=0 \
+docker compose -f docker-compose.prebuilt.yml -f docker-compose.gpu.yml up -d --build mediaforge
+```
+
+If FFmpeg reports an unknown encoder, the container can see the GPU but the
+FFmpeg build does not include NVENC support. Use an FFmpeg build with NVIDIA
+codec support or a GPU-ready runtime image.
+
+## 12. Runtime Modes In Docker
 
 Default combined mode:
 
@@ -392,13 +464,14 @@ Process one task:
 docker run --rm --env-file .env.production mediaforge:local process-task <task_id>
 ```
 
-## 12. Validation Commands
+## 13. Validation Commands
 
 Run syntax and local checks:
 
 ```bash
 bash -n scripts/build-prebuilt-binary.sh
 docker compose config
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml config
 docker compose -f docker-compose.prebuilt.yml config
 docker compose -f docker-compose.prebuilt.cn.yml config
 ```
@@ -423,7 +496,7 @@ docker buildx build \
   .
 ```
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 Binary does not run:
 
@@ -444,6 +517,7 @@ FFmpeg fails:
 - Run `docker run --rm mediaforge:local ffmpeg -version` by overriding entrypoint if needed.
 - Check codec availability in the Debian FFmpeg build.
 - Keep `MEDIAFORGE_FFMPEG_THREADS` explicit.
+- For NVIDIA acceleration, verify Docker GPU access and `ffmpeg -encoders | grep nvenc` inside the runtime image.
 
 libvips issues:
 

@@ -124,6 +124,7 @@ MEDIAFORGE_TEMP_DIR=/tmp/mediaforge
 MEDIAFORGE_FFMPEG_PATH=ffmpeg
 MEDIAFORGE_FFPROBE_PATH=ffprobe
 MEDIAFORGE_FFMPEG_THREADS=1
+MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION=none|nvidia
 
 MEDIAFORGE_WORKER_CONCURRENCY=2
 MEDIAFORGE_WORKER_POLL_INTERVAL_SECONDS=5
@@ -275,6 +276,12 @@ Required tools:
 - `ffprobe`
 
 Codec support depends on the FFmpeg build. H265 and AV1 support must be verified in the target runtime image before production use.
+
+NVIDIA acceleration requires Docker GPU access plus an FFmpeg build with NVENC
+encoders. Set `MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION=nvidia` to use
+`h264_nvenc` and `hevc_nvenc` for H264/H265 outputs. In Docker Compose, use the
+`docker-compose.gpu.yml` overlay and set `MEDIAFORGE_NVIDIA_DEVICE_ID` to the
+GPU index or UUID that should be visible to the container.
 
 ## 10. libvips Requirements
 

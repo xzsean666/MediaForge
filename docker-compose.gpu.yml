@@ -1,0 +1,15 @@
+services:
+  mediaforge:
+    environment:
+      MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION: ${MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION:-nvidia}
+      NVIDIA_VISIBLE_DEVICES: ${MEDIAFORGE_NVIDIA_DEVICE_ID:-0}
+      NVIDIA_DRIVER_CAPABILITIES: ${MEDIAFORGE_NVIDIA_DRIVER_CAPABILITIES:-compute,video,utility}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${MEDIAFORGE_NVIDIA_DEVICE_ID:-0}"
+              capabilities:
+                - gpu

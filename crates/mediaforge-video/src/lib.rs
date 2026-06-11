@@ -23,20 +23,34 @@ pub type VideoProcessingResult<T> = Result<T, VideoProcessingError>;
 
 const MAX_SCREENSHOT_REQUESTS: usize = 20;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 200_000;
+const MAX_NVIDIA_CQ: u8 = 51;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoAcceleration {
+    None,
+    Nvidia,
+}
 
 #[derive(Debug, Clone)]
 pub struct FfmpegProcessor {
     ffmpeg_path: String,
     ffprobe_path: String,
     thread_count: Option<usize>,
+    video_acceleration: VideoAcceleration,
 }
 
 impl FfmpegProcessor {
-    pub fn new(ffmpeg_path: String, ffprobe_path: String, thread_count: Option<usize>) -> Self {
+    pub fn new(
+        ffmpeg_path: String,
+        ffprobe_path: String,
+        thread_count: Option<usize>,
+        video_acceleration: VideoAcceleration,
+    ) -> Self {
         Self {
             ffmpeg_path,
             ffprobe_path,
             thread_count,
+            video_acceleration,
         }
     }
 
@@ -46,13 +60,13 @@ impl FfmpegProcessor {
         output_path: impl AsRef<Path>,
         profile: &VideoProfile,
     ) -> VideoProcessingResult<()> {
-        validate_profile(profile)?;
         let arguments = build_transcode_arguments(
             input_path.as_ref(),
             output_path.as_ref(),
             profile,
             self.thread_count,
-        );
+            self.video_acceleration,
+        )?;
         run_process(&self.ffmpeg_path, &arguments).await
     }
 
@@ -93,13 +107,14 @@ impl FfmpegProcessor {
         tokio::fs::create_dir_all(output_directory.as_ref()).await?;
         let playlist = output_directory.as_ref().join("master.m3u8");
         let segment_pattern = output_directory.as_ref().join("segment-%06d.ts");
+        let video_codec = hls_codec_name(self.video_acceleration);
         let mut arguments = base_ffmpeg_arguments(self.thread_count);
         arguments.extend([
             "-y".to_string(),
             "-i".to_string(),
             input_path.as_ref().display().to_string(),
             "-codec:v".to_string(),
-            "libx264".to_string(),
+            video_codec.to_string(),
             "-codec:a".to_string(),
             "aac".to_string(),
             "-f".to_string(),
@@ -214,7 +229,7 @@ impl FfmpegProcessor {
 }
 
 pub fn validate_request(request: &VideoProcessingRequest) -> VideoProcessingResult<()> {
-    validate_profile(&request.profile)?;
+    validate_profile(&request.profile, VideoAcceleration::None)?;
 
     if request.screenshots.len() > MAX_SCREENSHOT_REQUESTS {
         return Err(VideoProcessingError::InvalidRequest(format!(
@@ -234,14 +249,17 @@ pub fn build_transcode_arguments(
     output_path: &Path,
     profile: &VideoProfile,
     thread_count: Option<usize>,
-) -> Vec<String> {
+    video_acceleration: VideoAcceleration,
+) -> VideoProcessingResult<Vec<String>> {
+    validate_profile(profile, video_acceleration)?;
+
     let mut arguments = base_ffmpeg_arguments(thread_count);
     arguments.extend([
         "-y".to_string(),
         "-i".to_string(),
         input_path.display().to_string(),
         "-c:v".to_string(),
-        codec_name(profile.codec).to_string(),
+        codec_name(profile.codec, video_acceleration)?.to_string(),
     ]);
 
     if let Some(resolution) = profile.resolution {
@@ -250,7 +268,13 @@ pub fn build_transcode_arguments(
     }
 
     if let Some(crf) = profile.crf {
-        arguments.push("-crf".to_string());
+        arguments.push(
+            match video_acceleration {
+                VideoAcceleration::None => "-crf",
+                VideoAcceleration::Nvidia => "-cq",
+            }
+            .to_string(),
+        );
         arguments.push(crf.to_string());
     }
 
@@ -267,13 +291,23 @@ pub fn build_transcode_arguments(
     arguments.push("-c:a".to_string());
     arguments.push("aac".to_string());
     arguments.push(output_path.display().to_string());
-    arguments
+    Ok(arguments)
 }
 
-fn validate_profile(profile: &VideoProfile) -> VideoProcessingResult<()> {
+fn validate_profile(
+    profile: &VideoProfile,
+    video_acceleration: VideoAcceleration,
+) -> VideoProcessingResult<()> {
     if profile.container == VideoContainer::Mp4 && profile.codec == VideoCodec::Av1 {
         return Err(VideoProcessingError::InvalidRequest(
             "AV1 MP4 support depends on the FFmpeg build; use MKV for portable AV1 output"
+                .to_string(),
+        ));
+    }
+
+    if video_acceleration == VideoAcceleration::Nvidia && profile.codec == VideoCodec::Av1 {
+        return Err(VideoProcessingError::InvalidRequest(
+            "NVIDIA acceleration currently supports H.264 and H.265 output; use CPU encoding for AV1"
                 .to_string(),
         ));
     }
@@ -283,6 +317,12 @@ fn validate_profile(profile: &VideoProfile) -> VideoProcessingResult<()> {
             return Err(VideoProcessingError::InvalidRequest(
                 "crf must be between 0 and 63".to_string(),
             ));
+        }
+
+        if video_acceleration == VideoAcceleration::Nvidia && crf > MAX_NVIDIA_CQ {
+            return Err(VideoProcessingError::InvalidRequest(format!(
+                "crf must be between 0 and {MAX_NVIDIA_CQ} when NVIDIA acceleration is enabled"
+            )));
         }
     }
 
@@ -306,11 +346,27 @@ fn validate_screenshot_timestamp(timestamp_seconds: f64) -> VideoProcessingResul
     Ok(())
 }
 
-fn codec_name(codec: VideoCodec) -> &'static str {
-    match codec {
-        VideoCodec::H264 => "libx264",
-        VideoCodec::H265 => "libx265",
-        VideoCodec::Av1 => "libsvtav1",
+fn codec_name(
+    codec: VideoCodec,
+    video_acceleration: VideoAcceleration,
+) -> VideoProcessingResult<&'static str> {
+    match (video_acceleration, codec) {
+        (VideoAcceleration::None, VideoCodec::H264) => Ok("libx264"),
+        (VideoAcceleration::None, VideoCodec::H265) => Ok("libx265"),
+        (VideoAcceleration::None, VideoCodec::Av1) => Ok("libsvtav1"),
+        (VideoAcceleration::Nvidia, VideoCodec::H264) => Ok("h264_nvenc"),
+        (VideoAcceleration::Nvidia, VideoCodec::H265) => Ok("hevc_nvenc"),
+        (VideoAcceleration::Nvidia, VideoCodec::Av1) => Err(VideoProcessingError::InvalidRequest(
+            "NVIDIA acceleration currently supports H.264 and H.265 output; use CPU encoding for AV1"
+                .to_string(),
+        )),
+    }
+}
+
+fn hls_codec_name(video_acceleration: VideoAcceleration) -> &'static str {
+    match video_acceleration {
+        VideoAcceleration::None => "libx264",
+        VideoAcceleration::Nvidia => "h264_nvenc",
     }
 }
 
@@ -354,7 +410,9 @@ mod tests {
             Path::new("/tmp/output.mp4"),
             &profile,
             Some(1),
-        );
+            VideoAcceleration::None,
+        )
+        .unwrap();
 
         assert!(arguments
             .windows(2)
@@ -362,6 +420,56 @@ mod tests {
         assert!(arguments.contains(&"libx264".to_string()));
         assert!(arguments.contains(&"scale=-2:720".to_string()));
         assert!(arguments.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn nvidia_transcode_arguments_use_nvenc_quality_option() {
+        let profile = VideoProfile {
+            codec: VideoCodec::H264,
+            container: VideoContainer::Mp4,
+            resolution: Some(VideoResolution::P720),
+            crf: Some(23),
+            bitrate_kbps: None,
+        };
+
+        let arguments = build_transcode_arguments(
+            Path::new("/tmp/input.mp4"),
+            Path::new("/tmp/output.mp4"),
+            &profile,
+            Some(1),
+            VideoAcceleration::Nvidia,
+        )
+        .unwrap();
+
+        assert!(arguments.contains(&"h264_nvenc".to_string()));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-cq" && pair[1] == "23"));
+        assert!(!arguments.contains(&"-crf".to_string()));
+    }
+
+    #[test]
+    fn nvidia_acceleration_rejects_av1() {
+        let profile = VideoProfile {
+            codec: VideoCodec::Av1,
+            container: VideoContainer::Mkv,
+            resolution: Some(VideoResolution::P720),
+            crf: Some(23),
+            bitrate_kbps: None,
+        };
+
+        let result = build_transcode_arguments(
+            Path::new("/tmp/input.mkv"),
+            Path::new("/tmp/output.mkv"),
+            &profile,
+            Some(1),
+            VideoAcceleration::Nvidia,
+        );
+
+        assert!(matches!(
+            result,
+            Err(VideoProcessingError::InvalidRequest(_))
+        ));
     }
 
     #[test]

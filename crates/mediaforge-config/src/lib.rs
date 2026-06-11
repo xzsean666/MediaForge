@@ -17,6 +17,8 @@ pub enum ConfigError {
     InvalidRuntimeMode(String),
     #[error("invalid storage backend: {0}")]
     InvalidStorageBackend(String),
+    #[error("invalid FFmpeg video acceleration: {0}")]
+    InvalidFfmpegVideoAcceleration(String),
     #[error("invalid socket address in {name}: {value}")]
     InvalidSocketAddress { name: &'static str, value: String },
     #[error("invalid unsigned integer in {name}: {value}")]
@@ -40,6 +42,12 @@ pub enum StorageBackend {
     Filesystem,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegVideoAcceleration {
+    None,
+    Nvidia,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub runtime_mode: RuntimeMode,
@@ -53,6 +61,7 @@ pub struct AppConfig {
     pub ffmpeg_path: String,
     pub ffprobe_path: String,
     pub ffmpeg_threads: Option<usize>,
+    pub ffmpeg_video_acceleration: FfmpegVideoAcceleration,
     pub worker_concurrency: usize,
     pub worker_poll_interval: Duration,
     pub task_lease_timeout: Duration,
@@ -193,6 +202,10 @@ impl AppConfig {
             ffmpeg_path: env_string("MEDIAFORGE_FFMPEG_PATH", "ffmpeg"),
             ffprobe_path: env_string("MEDIAFORGE_FFPROBE_PATH", "ffprobe"),
             ffmpeg_threads: optional_usize("MEDIAFORGE_FFMPEG_THREADS")?,
+            ffmpeg_video_acceleration: parse_ffmpeg_video_acceleration(env_string(
+                "MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION",
+                "none",
+            ))?,
             worker_concurrency,
             worker_poll_interval: Duration::from_secs(poll_interval_seconds),
             task_lease_timeout: Duration::from_secs(lease_timeout_seconds),
@@ -254,6 +267,14 @@ fn parse_storage_backend(value: String) -> ConfigResult<StorageBackend> {
         "s3" => Ok(StorageBackend::S3),
         "filesystem" => Ok(StorageBackend::Filesystem),
         _ => Err(ConfigError::InvalidStorageBackend(value)),
+    }
+}
+
+fn parse_ffmpeg_video_acceleration(value: String) -> ConfigResult<FfmpegVideoAcceleration> {
+    match value.as_str() {
+        "none" | "cpu" | "software" => Ok(FfmpegVideoAcceleration::None),
+        "nvidia" | "nvenc" => Ok(FfmpegVideoAcceleration::Nvidia),
+        _ => Err(ConfigError::InvalidFfmpegVideoAcceleration(value)),
     }
 }
 
@@ -324,6 +345,34 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_video_acceleration_aliases_are_parsed() {
+        assert_eq!(
+            parse_ffmpeg_video_acceleration("none".to_string()).unwrap(),
+            FfmpegVideoAcceleration::None
+        );
+        assert_eq!(
+            parse_ffmpeg_video_acceleration("cpu".to_string()).unwrap(),
+            FfmpegVideoAcceleration::None
+        );
+        assert_eq!(
+            parse_ffmpeg_video_acceleration("nvidia".to_string()).unwrap(),
+            FfmpegVideoAcceleration::Nvidia
+        );
+        assert_eq!(
+            parse_ffmpeg_video_acceleration("nvenc".to_string()).unwrap(),
+            FfmpegVideoAcceleration::Nvidia
+        );
+    }
+
+    #[test]
+    fn invalid_ffmpeg_video_acceleration_is_rejected() {
+        assert!(matches!(
+            parse_ffmpeg_video_acceleration("cuda".to_string()),
+            Err(ConfigError::InvalidFfmpegVideoAcceleration(_))
+        ));
+    }
+
+    #[test]
     fn development_signing_secrets_are_detected() {
         let mut config = AppConfig::from_env().unwrap_or_else(|_| AppConfig {
             runtime_mode: RuntimeMode::Combined,
@@ -355,6 +404,7 @@ mod tests {
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             ffmpeg_threads: None,
+            ffmpeg_video_acceleration: FfmpegVideoAcceleration::None,
             worker_concurrency: 1,
             worker_poll_interval: Duration::from_secs(1),
             task_lease_timeout: Duration::from_secs(600),

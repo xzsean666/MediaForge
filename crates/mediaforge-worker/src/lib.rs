@@ -17,7 +17,7 @@ use mediaforge_types::{
     VideoProcessingRequest,
 };
 use mediaforge_uploads::{UploadSession, UploadSessionRepository, UploadState};
-use mediaforge_video::{FfmpegProcessor, VideoProcessingError};
+use mediaforge_video::{FfmpegProcessor, VideoAcceleration, VideoProcessingError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -105,6 +105,7 @@ impl WorkerRuntime {
                 config.ffmpeg_path.clone(),
                 config.ffprobe_path.clone(),
                 config.ffmpeg_threads,
+                video_acceleration(config.ffmpeg_video_acceleration),
             ),
             manifests: ManifestRepository::new(storage.clone()),
             tasks: TaskRepository::new(storage.clone()),
@@ -798,6 +799,15 @@ impl WorkerRuntime {
     }
 }
 
+fn video_acceleration(
+    acceleration: mediaforge_config::FfmpegVideoAcceleration,
+) -> VideoAcceleration {
+    match acceleration {
+        mediaforge_config::FfmpegVideoAcceleration::None => VideoAcceleration::None,
+        mediaforge_config::FfmpegVideoAcceleration::Nvidia => VideoAcceleration::Nvidia,
+    }
+}
+
 fn default_video_processing_request() -> VideoProcessingRequest {
     use mediaforge_types::{
         ImageOutputFormat, ScreenshotRequest, VideoCodec, VideoContainer, VideoProfile,
@@ -889,6 +899,7 @@ mod tests {
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             ffmpeg_threads: Some(1),
+            ffmpeg_video_acceleration: mediaforge_config::FfmpegVideoAcceleration::None,
             worker_concurrency: 2,
             worker_poll_interval: Duration::from_secs(1),
             task_lease_timeout: Duration::from_secs(600),

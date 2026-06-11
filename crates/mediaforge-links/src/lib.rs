@@ -224,6 +224,7 @@ mod tests {
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             ffmpeg_threads: Some(1),
+            ffmpeg_video_acceleration: mediaforge_config::FfmpegVideoAcceleration::None,
             worker_concurrency: 1,
             worker_poll_interval: Duration::from_secs(1),
             task_lease_timeout: Duration::from_secs(600),

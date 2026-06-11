@@ -65,6 +65,7 @@ ENV MEDIAFORGE_HTTP_BIND=0.0.0.0:8080 \
     MEDIAFORGE_FFMPEG_PATH=ffmpeg \
     MEDIAFORGE_FFPROBE_PATH=ffprobe \
     MEDIAFORGE_FFMPEG_THREADS=1 \
+    MEDIAFORGE_FFMPEG_VIDEO_ACCELERATION=none \
     MEDIAFORGE_WORKER_CONCURRENCY=1 \
     MEDIAFORGE_WORKER_POLL_INTERVAL_SECONDS=5 \
     MEDIAFORGE_LOG_LEVEL=info
@@ -79,4 +80,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mediaforge"]
 CMD ["combined"]
-
